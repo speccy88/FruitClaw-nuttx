@@ -76,10 +76,32 @@
 #define ESP_HOSTED_RPC_FIELD_UID         3
 
 #define ESP_HOSTED_WIFI_IF_STA           0
-#define ESP_HOSTED_RPC_PAYLOAD_MAX       128
+#define ESP_HOSTED_RPC_PAYLOAD_MAX       512
 #define ESP_HOSTED_IDF_TARGET_MAX        16
 #define ESP_HOSTED_NETDEV_RX_QUOTA       4
 #define ESP_HOSTED_NETDEV_TX_QUOTA       2
+#define ESP_HOSTED_WIFI_PASSWORD_MAX     64
+#define ESP_HOSTED_WIFI_MODE_STA         1
+#define ESP_HOSTED_WIFI_INIT_MAGIC       0x1f2f3f4f
+#define ESP_HOSTED_WIFI_INIT_STATIC_RX   10
+#define ESP_HOSTED_WIFI_INIT_DYNAMIC_RX  32
+#define ESP_HOSTED_WIFI_INIT_TX_TYPE     1
+#define ESP_HOSTED_WIFI_INIT_DYNAMIC_TX  32
+#define ESP_HOSTED_WIFI_INIT_RX_MGMT_NUM 5
+#define ESP_HOSTED_WIFI_INIT_AMPDU_RX    1
+#define ESP_HOSTED_WIFI_INIT_AMPDU_TX    1
+#define ESP_HOSTED_WIFI_INIT_NVS         1
+#define ESP_HOSTED_WIFI_INIT_RX_BA_WIN   6
+#define ESP_HOSTED_WIFI_INIT_BEACON_MAX  752
+#define ESP_HOSTED_WIFI_INIT_MGMT_SBUF   32
+#define ESP_HOSTED_WIFI_INIT_ESPNOW_MAX  7
+#define ESP_HOSTED_WIFI_INIT_TX_HETB_NUM 3
+#define ESP_HOSTED_WIFI_AUTH_OPEN        0
+#define ESP_HOSTED_WIFI_AUTH_WPA_PSK     2
+#define ESP_HOSTED_WIFI_AUTH_WPA2_PSK    3
+#define ESP_HOSTED_WIFI_AUTH_WPA_WPA2    4
+#define ESP_HOSTED_WIFI_AUTH_WPA3_PSK    6
+#define ESP_HOSTED_WIFI_AUTH_WPA2_WPA3   7
 
 /****************************************************************************
  * Private Types
@@ -133,6 +155,16 @@ struct esp_hosted_driver_s
   bool wlan_registered;
   bool ifup;
   bool carrier_on;
+  bool wlan_control_start_pending;
+  bool wlan_control_started;
+  bool have_ssid;
+  uint32_t auth_wpa;
+  uint32_t cipher_pairwise;
+  uint32_t cipher_group;
+  uint8_t ssid_len;
+  uint8_t passphrase_len;
+  char ssid[IW_ESSID_MAX_SIZE + 1];
+  char passphrase[ESP_HOSTED_WIFI_PASSWORD_MAX + 1];
 #endif
   uint16_t seq_num;
   uint8_t mac[ESP_HOSTED_MAC_SIZE];
@@ -155,8 +187,12 @@ static struct esp_hosted_driver_s g_esp_hosted;
  ****************************************************************************/
 
 static void esp_hosted_rx_work(FAR void *arg);
+static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
+                                       uint32_t request_id);
 
 #ifdef CONFIG_ESP_HOSTED_WLAN
+static int esp_hosted_run_wlan_control_start(
+  FAR struct esp_hosted_driver_s *priv);
 static int esp_hosted_wlan_ifup(FAR struct netdev_lowerhalf_s *dev);
 static int esp_hosted_wlan_ifdown(FAR struct netdev_lowerhalf_s *dev);
 static int esp_hosted_wlan_transmit(FAR struct netdev_lowerhalf_s *dev,
@@ -170,6 +206,12 @@ static int esp_hosted_wlan_ioctl(FAR struct netdev_lowerhalf_s *dev,
 static void esp_hosted_wlan_reclaim(FAR struct netdev_lowerhalf_s *dev);
 static int esp_hosted_wlan_connect(FAR struct netdev_lowerhalf_s *dev);
 static int esp_hosted_wlan_disconnect(FAR struct netdev_lowerhalf_s *dev);
+static int esp_hosted_wlan_essid(FAR struct netdev_lowerhalf_s *dev,
+                                 FAR struct iwreq *iwr, bool set);
+static int esp_hosted_wlan_passwd(FAR struct netdev_lowerhalf_s *dev,
+                                  FAR struct iwreq *iwr, bool set);
+static int esp_hosted_wlan_auth(FAR struct netdev_lowerhalf_s *dev,
+                                FAR struct iwreq *iwr, bool set);
 static int esp_hosted_wlan_scan(FAR struct netdev_lowerhalf_s *dev,
                                 FAR struct iwreq *iwr, bool set);
 static int esp_hosted_wlan_range(FAR struct netdev_lowerhalf_s *dev,
@@ -197,6 +239,9 @@ static const struct wireless_ops_s g_esp_hosted_wireless_ops =
 {
   .connect    = esp_hosted_wlan_connect,
   .disconnect = esp_hosted_wlan_disconnect,
+  .essid      = esp_hosted_wlan_essid,
+  .passwd     = esp_hosted_wlan_passwd,
+  .auth       = esp_hosted_wlan_auth,
   .scan       = esp_hosted_wlan_scan,
   .range      = esp_hosted_wlan_range,
 };
@@ -394,6 +439,287 @@ static uint32_t esp_hosted_next_rpc_uid(FAR struct esp_hosted_driver_s *priv)
 }
 
 #ifdef CONFIG_ESP_HOSTED_WLAN
+static uint32_t esp_hosted_wlan_authmode(
+  FAR const struct esp_hosted_driver_s *priv)
+{
+  if (priv->passphrase_len == 0 ||
+      priv->auth_wpa == IW_AUTH_WPA_VERSION_DISABLED)
+    {
+      return ESP_HOSTED_WIFI_AUTH_OPEN;
+    }
+
+  if ((priv->auth_wpa & IW_AUTH_WPA_VERSION_WPA3) != 0 &&
+      (priv->auth_wpa & IW_AUTH_WPA_VERSION_WPA2) != 0)
+    {
+      return ESP_HOSTED_WIFI_AUTH_WPA2_WPA3;
+    }
+
+  if ((priv->auth_wpa & IW_AUTH_WPA_VERSION_WPA3) != 0)
+    {
+      return ESP_HOSTED_WIFI_AUTH_WPA3_PSK;
+    }
+
+  if ((priv->auth_wpa & IW_AUTH_WPA_VERSION_WPA2) != 0 &&
+      (priv->auth_wpa & IW_AUTH_WPA_VERSION_WPA) != 0)
+    {
+      return ESP_HOSTED_WIFI_AUTH_WPA_WPA2;
+    }
+
+  if ((priv->auth_wpa & IW_AUTH_WPA_VERSION_WPA) != 0)
+    {
+      return ESP_HOSTED_WIFI_AUTH_WPA_PSK;
+    }
+
+  return ESP_HOSTED_WIFI_AUTH_WPA2_PSK;
+}
+
+static int esp_hosted_build_wifi_init_payload(FAR uint8_t *payload,
+                                              size_t payload_size,
+                                              FAR size_t *payload_len)
+{
+  uint8_t cfg_payload[128];
+  size_t cfg_len = 0;
+  size_t offset = 0;
+  int ret;
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 1,
+                                          ESP_HOSTED_WIFI_INIT_STATIC_RX);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 2,
+                                          ESP_HOSTED_WIFI_INIT_DYNAMIC_RX);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 3,
+                                          ESP_HOSTED_WIFI_INIT_TX_TYPE);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 5,
+                                          ESP_HOSTED_WIFI_INIT_DYNAMIC_TX);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 7, 0);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 8,
+                                          ESP_HOSTED_WIFI_INIT_AMPDU_RX);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 9,
+                                          ESP_HOSTED_WIFI_INIT_AMPDU_TX);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 11,
+                                          ESP_HOSTED_WIFI_INIT_NVS);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 13,
+                                          ESP_HOSTED_WIFI_INIT_RX_BA_WIN);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 15,
+                                          ESP_HOSTED_WIFI_INIT_BEACON_MAX);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 16,
+                                          ESP_HOSTED_WIFI_INIT_MGMT_SBUF);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 18, 1);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 19,
+                                          ESP_HOSTED_WIFI_INIT_ESPNOW_MAX);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 20,
+                                          ESP_HOSTED_WIFI_INIT_MAGIC);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 21, 0);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 22,
+                                          ESP_HOSTED_WIFI_INIT_RX_MGMT_NUM);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(cfg_payload, sizeof(cfg_payload),
+                                          &cfg_len, 23,
+                                          ESP_HOSTED_WIFI_INIT_TX_HETB_NUM);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_bytes_field(payload, payload_size, &offset, 1,
+                                         cfg_payload, cfg_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  *payload_len = offset;
+  return OK;
+}
+
+static int esp_hosted_build_wifi_set_config_payload(
+  FAR struct esp_hosted_driver_s *priv, FAR uint8_t *payload,
+  size_t payload_size, FAR size_t *payload_len)
+{
+  uint8_t sta_payload[160];
+  uint8_t config_payload[192];
+  uint8_t threshold_payload[16];
+  size_t sta_len = 0;
+  size_t config_len = 0;
+  size_t threshold_len = 0;
+  size_t offset = 0;
+  int ret;
+
+  if (!priv->have_ssid || priv->ssid_len == 0)
+    {
+      return -ENOTCONN;
+    }
+
+  ret = esp_hosted_pb_append_bytes_field(sta_payload, sizeof(sta_payload),
+                                         &sta_len, 1,
+                                         (FAR const uint8_t *)priv->ssid,
+                                         priv->ssid_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (priv->passphrase_len > 0)
+    {
+      ret = esp_hosted_pb_append_bytes_field(sta_payload,
+                                             sizeof(sta_payload), &sta_len,
+                                             2,
+                                             (FAR const uint8_t *)
+                                             priv->passphrase,
+                                             priv->passphrase_len);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  ret = esp_hosted_pb_append_varint_field(sta_payload, sizeof(sta_payload),
+                                          &sta_len, 13, 3);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(threshold_payload,
+                                          sizeof(threshold_payload),
+                                          &threshold_len, 2,
+                                          esp_hosted_wlan_authmode(priv));
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_bytes_field(sta_payload, sizeof(sta_payload),
+                                         &sta_len, 9, threshold_payload,
+                                         threshold_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_bytes_field(config_payload,
+                                         sizeof(config_payload),
+                                         &config_len, 2,
+                                         sta_payload, sta_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(payload, payload_size, &offset, 1,
+                                          ESP_HOSTED_WIFI_IF_STA);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_bytes_field(payload, payload_size, &offset, 2,
+                                         config_payload, config_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  *payload_len = offset;
+  return OK;
+}
+#endif
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
 static void esp_hosted_wlan_clear_rx_queue(
   FAR struct esp_hosted_driver_s *priv)
 {
@@ -442,6 +768,7 @@ static int esp_hosted_try_register_wlan(FAR struct esp_hosted_driver_s *priv)
     }
 
   priv->wlan_registered = true;
+  priv->wlan_control_start_pending = true;
   priv->stats.wlan_register_count++;
 
   netdev_lower_carrier_off(&priv->lower);
@@ -855,6 +1182,110 @@ static int esp_hosted_parse_fwversion_response(
   return OK;
 }
 
+static int esp_hosted_parse_response_status(FAR const uint8_t *payload,
+                                            size_t len,
+                                            FAR int32_t *resp)
+{
+  size_t offset = 0;
+  int ret;
+
+  *resp = 0;
+
+  while (offset < len)
+    {
+      uint64_t key;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      if (field == 1)
+        {
+          uint64_t value;
+
+          if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+            {
+              return -EINVAL;
+            }
+
+          ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+          if (ret < 0)
+            {
+              return ret;
+            }
+
+          *resp = esp_hosted_pb_int32(value);
+        }
+      else
+        {
+          ret = esp_hosted_pb_skip_field(payload, len, &offset, wire_type);
+          if (ret < 0)
+            {
+              return ret;
+            }
+        }
+    }
+
+  return OK;
+}
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+static int esp_hosted_parse_sta_connected_event(
+  FAR struct esp_hosted_driver_s *priv, FAR const uint8_t *payload,
+  size_t len)
+{
+  int32_t resp;
+  int ret;
+
+  ret = esp_hosted_parse_response_status(payload, len, &resp);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (resp == 0 && priv->wlan_registered)
+    {
+      priv->carrier_on = true;
+      priv->stats.wlan_link_up_count++;
+      netdev_lower_carrier_on(&priv->lower);
+    }
+
+  ninfo("ESP-Hosted STA connected event: resp=%" PRId32 "\n", resp);
+  return OK;
+}
+
+static int esp_hosted_parse_sta_disconnected_event(
+  FAR struct esp_hosted_driver_s *priv, FAR const uint8_t *payload,
+  size_t len)
+{
+  int32_t resp;
+  int ret;
+
+  ret = esp_hosted_parse_response_status(payload, len, &resp);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (priv->wlan_registered)
+    {
+      priv->carrier_on = false;
+      priv->stats.wlan_link_down_count++;
+      netdev_lower_carrier_off(&priv->lower);
+    }
+
+  ninfo("ESP-Hosted STA disconnected event: resp=%" PRId32 "\n", resp);
+  return OK;
+}
+#endif
+
 static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
                                           FAR const uint8_t *payload,
                                           uint16_t len)
@@ -887,6 +1318,8 @@ static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
 
       switch (msg.msg_id)
         {
+          int32_t resp;
+
           case ESP_HOSTED_RPC_RESP_GET_MAC_ADDRESS:
             return esp_hosted_parse_mac_response(priv, msg.payload,
                                                  msg.payload_len);
@@ -894,6 +1327,34 @@ static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
           case ESP_HOSTED_RPC_RESP_GET_COPROCESSOR_FWVERSION:
             return esp_hosted_parse_fwversion_response(priv, msg.payload,
                                                        msg.payload_len);
+
+          case ESP_HOSTED_RPC_RESP_SET_MODE:
+          case ESP_HOSTED_RPC_RESP_WIFI_INIT:
+          case ESP_HOSTED_RPC_RESP_WIFI_START:
+          case ESP_HOSTED_RPC_RESP_WIFI_CONNECT:
+          case ESP_HOSTED_RPC_RESP_WIFI_DISCONNECT:
+          case ESP_HOSTED_RPC_RESP_WIFI_SET_CONFIG:
+          case ESP_HOSTED_RPC_RESP_WIFI_SCAN_START:
+            ret = esp_hosted_parse_response_status(msg.payload,
+                                                   msg.payload_len, &resp);
+            if (ret < 0)
+              {
+                return ret;
+              }
+
+            if (resp != 0)
+              {
+                priv->stats.rpc_malformed_count++;
+                nwarn("ESP-Hosted RPC response failed: id=%" PRIu32
+                      " resp=%" PRId32 "\n",
+                      msg.msg_id, resp);
+                return -EIO;
+              }
+
+            ninfo("ESP-Hosted RPC response OK: id=%" PRIu32
+                  " uid=%" PRIu32 "\n",
+                  msg.msg_id, msg.uid);
+            return OK;
 
           default:
             ninfo("ESP-Hosted RPC response: id=%" PRIu32 " uid=%" PRIu32
@@ -905,10 +1366,25 @@ static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
   else if (msg.msg_type == ESP_HOSTED_RPC_TYPE_EVENT)
     {
       priv->stats.rpc_event_count++;
-      ninfo("ESP-Hosted RPC event: id=%" PRIu32 " uid=%" PRIu32
-            " len=%zu\n",
-            msg.msg_id, msg.uid, msg.payload_len);
-      return OK;
+
+      switch (msg.msg_id)
+        {
+#ifdef CONFIG_ESP_HOSTED_WLAN
+          case ESP_HOSTED_RPC_EVENT_STA_CONNECTED:
+            return esp_hosted_parse_sta_connected_event(priv, msg.payload,
+                                                        msg.payload_len);
+
+          case ESP_HOSTED_RPC_EVENT_STA_DISCONNECTED:
+            return esp_hosted_parse_sta_disconnected_event(priv, msg.payload,
+                                                           msg.payload_len);
+#endif
+
+          default:
+            ninfo("ESP-Hosted RPC event: id=%" PRIu32 " uid=%" PRIu32
+                  " len=%zu\n",
+                  msg.msg_id, msg.uid, msg.payload_len);
+            return OK;
+        }
     }
 
   priv->stats.rpc_malformed_count++;
@@ -925,7 +1401,7 @@ static int esp_hosted_build_rpc_request(FAR struct esp_hosted_driver_s *priv,
                                         size_t payload_size,
                                         FAR size_t *payload_len)
 {
-  uint8_t request_payload[16];
+  uint8_t request_payload[256];
   size_t request_len = 0;
   size_t offset = 0;
   uint32_t uid;
@@ -946,6 +1422,47 @@ static int esp_hosted_build_rpc_request(FAR struct esp_hosted_driver_s *priv,
 
       case ESP_HOSTED_RPC_GET_COPROCESSOR_FWVERSION:
         break;
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+      case ESP_HOSTED_RPC_SET_MODE:
+        ret = esp_hosted_pb_append_varint_field(request_payload,
+                                                sizeof(request_payload),
+                                                &request_len, 1,
+                                                ESP_HOSTED_WIFI_MODE_STA);
+        if (ret < 0)
+          {
+            return ret;
+          }
+        break;
+
+      case ESP_HOSTED_RPC_WIFI_INIT:
+        ret = esp_hosted_build_wifi_init_payload(request_payload,
+                                                sizeof(request_payload),
+                                                &request_len);
+        if (ret < 0)
+          {
+            return ret;
+          }
+        break;
+
+      case ESP_HOSTED_RPC_WIFI_START:
+      case ESP_HOSTED_RPC_WIFI_CONNECT:
+      case ESP_HOSTED_RPC_WIFI_DISCONNECT:
+        break;
+
+      case ESP_HOSTED_RPC_WIFI_SET_CONFIG:
+        ret = esp_hosted_build_wifi_set_config_payload(priv, request_payload,
+                                                       sizeof(request_payload),
+                                                       &request_len);
+        if (ret < 0)
+          {
+            return ret;
+          }
+        break;
+
+      case ESP_HOSTED_RPC_WIFI_SCAN_START:
+        break;
+#endif
 
       default:
         return -EINVAL;
@@ -1417,26 +1934,258 @@ static void esp_hosted_wlan_reclaim(FAR struct netdev_lowerhalf_s *dev)
 
 static int esp_hosted_wlan_connect(FAR struct netdev_lowerhalf_s *dev)
 {
-  UNUSED(dev);
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  int ret;
 
-  return -ENOSYS;
+  if (!priv->have_ssid)
+    {
+      return -ENOTCONN;
+    }
+
+  ret = esp_hosted_run_wlan_control_start(priv);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_SET_CONFIG);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_CONNECT);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  priv->stats.wlan_connect_count++;
+  return OK;
 }
 
 static int esp_hosted_wlan_disconnect(FAR struct netdev_lowerhalf_s *dev)
 {
-  UNUSED(dev);
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  int ret;
 
-  return -ENOSYS;
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_DISCONNECT);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  priv->carrier_on = false;
+  priv->stats.wlan_disconnect_count++;
+  netdev_lower_carrier_off(&priv->lower);
+  return OK;
+}
+
+static int esp_hosted_wlan_essid(FAR struct netdev_lowerhalf_s *dev,
+                                 FAR struct iwreq *iwr, bool set)
+{
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  size_t len;
+  int ret;
+
+  if (iwr == NULL || iwr->u.essid.pointer == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (!set)
+    {
+      len = priv->ssid_len;
+      if (iwr->u.essid.length < len + 1)
+        {
+          return -ENOSPC;
+        }
+
+      memcpy(iwr->u.essid.pointer, priv->ssid, len);
+      ((FAR char *)iwr->u.essid.pointer)[len] = '\0';
+      iwr->u.essid.length = len;
+      iwr->u.essid.flags = priv->have_ssid ? IW_ESSID_ON : IW_ESSID_OFF;
+      return OK;
+    }
+
+  len = iwr->u.essid.length;
+  if (len > 0 && ((FAR const char *)iwr->u.essid.pointer)[len - 1] == '\0')
+    {
+      len--;
+    }
+
+  if (len > IW_ESSID_MAX_SIZE)
+    {
+      return -EINVAL;
+    }
+
+  ret = nxmutex_lock(&priv->lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  memcpy(priv->ssid, iwr->u.essid.pointer, len);
+  priv->ssid[len] = '\0';
+  priv->ssid_len = len;
+  priv->have_ssid = len > 0;
+  nxmutex_unlock(&priv->lock);
+
+  return OK;
+}
+
+static int esp_hosted_wlan_passwd(FAR struct netdev_lowerhalf_s *dev,
+                                  FAR struct iwreq *iwr, bool set)
+{
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  FAR struct iw_encode_ext *ext;
+  int ret;
+
+  if (iwr == NULL || iwr->u.encoding.pointer == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (iwr->u.encoding.length < sizeof(struct iw_encode_ext))
+    {
+      return -EINVAL;
+    }
+
+  ext = (FAR struct iw_encode_ext *)iwr->u.encoding.pointer;
+  if (!set)
+    {
+      ext->alg = priv->passphrase_len > 0 ? IW_ENCODE_ALG_CCMP :
+                                            IW_ENCODE_ALG_NONE;
+      ext->key_len = 0;
+      iwr->u.encoding.flags = IW_ENCODE_NOKEY;
+      return OK;
+    }
+
+  if ((iwr->u.encoding.flags & IW_ENCODE_DISABLED) != 0 ||
+      ext->alg == IW_ENCODE_ALG_NONE || ext->key_len == 0)
+    {
+      ret = nxmutex_lock(&priv->lock);
+      if (ret < 0)
+        {
+          return ret;
+        }
+
+      memset(priv->passphrase, 0, sizeof(priv->passphrase));
+      priv->passphrase_len = 0;
+      nxmutex_unlock(&priv->lock);
+      return OK;
+    }
+
+  if (ext->key_len > ESP_HOSTED_WIFI_PASSWORD_MAX ||
+      iwr->u.encoding.length < sizeof(*ext) + ext->key_len)
+    {
+      return -EINVAL;
+    }
+
+  ret = nxmutex_lock(&priv->lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  memcpy(priv->passphrase, ext->key, ext->key_len);
+  priv->passphrase[ext->key_len] = '\0';
+  priv->passphrase_len = ext->key_len;
+  nxmutex_unlock(&priv->lock);
+
+  return OK;
+}
+
+static int esp_hosted_wlan_auth(FAR struct netdev_lowerhalf_s *dev,
+                                FAR struct iwreq *iwr, bool set)
+{
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  uint32_t index;
+
+  if (iwr == NULL)
+    {
+      return -EINVAL;
+    }
+
+  index = iwr->u.param.flags & IW_AUTH_INDEX;
+  if (set)
+    {
+      switch (index)
+        {
+          case IW_AUTH_WPA_VERSION:
+            priv->auth_wpa = iwr->u.param.value;
+            break;
+
+          case IW_AUTH_CIPHER_PAIRWISE:
+            priv->cipher_pairwise = iwr->u.param.value;
+            break;
+
+          case IW_AUTH_CIPHER_GROUP:
+            priv->cipher_group = iwr->u.param.value;
+            break;
+
+          default:
+            break;
+        }
+    }
+  else
+    {
+      switch (index)
+        {
+          case IW_AUTH_WPA_VERSION:
+            iwr->u.param.value = priv->auth_wpa;
+            break;
+
+          case IW_AUTH_CIPHER_PAIRWISE:
+            iwr->u.param.value = priv->cipher_pairwise;
+            break;
+
+          case IW_AUTH_CIPHER_GROUP:
+            iwr->u.param.value = priv->cipher_group;
+            break;
+
+          default:
+            iwr->u.param.value = 0;
+            break;
+        }
+    }
+
+  return OK;
 }
 
 static int esp_hosted_wlan_scan(FAR struct netdev_lowerhalf_s *dev,
                                 FAR struct iwreq *iwr, bool set)
 {
-  UNUSED(dev);
-  UNUSED(iwr);
-  UNUSED(set);
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  int ret;
 
-  return -ENOSYS;
+  UNUSED(iwr);
+
+  if (!set)
+    {
+      return -EAGAIN;
+    }
+
+  ret = esp_hosted_run_wlan_control_start(priv);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_SCAN_START);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  priv->stats.wlan_scan_start_count++;
+  return OK;
 }
 
 static int esp_hosted_wlan_range(FAR struct netdev_lowerhalf_s *dev,
@@ -1494,6 +2243,53 @@ static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
   nxmutex_unlock(&priv->lock);
   return parse_ret;
 }
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+static int esp_hosted_run_wlan_control_start(
+  FAR struct esp_hosted_driver_s *priv)
+{
+  int ret;
+
+  if (priv->wlan_control_started)
+    {
+      return OK;
+    }
+
+  if (!priv->have_mac || !priv->have_fwversion)
+    {
+      return -EAGAIN;
+    }
+
+  priv->wlan_control_start_pending = false;
+
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_INIT);
+  if (ret < 0)
+    {
+      priv->stats.wlan_control_start_error_count++;
+      return ret;
+    }
+
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_SET_MODE);
+  if (ret < 0)
+    {
+      priv->stats.wlan_control_start_error_count++;
+      return ret;
+    }
+
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_START);
+  if (ret < 0)
+    {
+      priv->stats.wlan_control_start_error_count++;
+      return ret;
+    }
+
+  priv->wlan_control_started = true;
+  priv->stats.wlan_control_start_count++;
+
+  ninfo("ESP-Hosted STA control path start requested\n");
+  return OK;
+}
+#endif
 
 static void esp_hosted_run_startup_probe(FAR struct esp_hosted_driver_s *priv)
 {
@@ -1574,10 +2370,26 @@ static void esp_hosted_drain_rx(FAR struct esp_hosted_driver_s *priv)
 static void esp_hosted_rx_work(FAR void *arg)
 {
   FAR struct esp_hosted_driver_s *priv = arg;
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  int ret;
+#endif
 
   esp_hosted_drain_rx(priv);
   esp_hosted_run_startup_probe(priv);
   esp_hosted_drain_rx(priv);
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  if (priv->wlan_control_start_pending)
+    {
+      ret = esp_hosted_run_wlan_control_start(priv);
+      if (ret < 0 && ret != -EAGAIN)
+        {
+          nwarn("ESP-Hosted STA control start failed: %d\n", ret);
+        }
+    }
+
+  esp_hosted_drain_rx(priv);
+#endif
 }
 
 static int esp_hosted_attach_irq(FAR struct esp_hosted_driver_s *priv)
@@ -1664,6 +2476,9 @@ int esp_hosted_spi_initialize(FAR const struct esp_hosted_config_s *config)
 #ifdef CONFIG_ESP_HOSTED_WLAN
   spin_lock_init(&g_esp_hosted.rx_lock);
   IOB_QINIT(&g_esp_hosted.rx_queue);
+  g_esp_hosted.auth_wpa = IW_AUTH_WPA_VERSION_WPA2;
+  g_esp_hosted.cipher_pairwise = IW_AUTH_CIPHER_CCMP;
+  g_esp_hosted.cipher_group = IW_AUTH_CIPHER_CCMP;
 #endif
 
   /* Do not register wlan0 until the C6 has answered identity RPCs. */

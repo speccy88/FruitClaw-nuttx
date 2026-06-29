@@ -54,10 +54,23 @@ The driver now contains the first real NuttX lower-half plumbing for the
 station data path. It allocates a `netdev_lowerhalf_s`, registers it as
 `NET_LL_IEEE80211` only after both identity RPCs succeed, queues incoming
 `ESP_STA_IF` frames into NuttX `netpkt` RX buffers, and wraps NuttX TX packets
-as `ESP_STA_IF` frames for the full-duplex SPI transport. Carrier is kept off,
-and scan/connect WAPI operations still return `-ENOSYS` until their ESP-Hosted
-RPC mappings are implemented. That keeps the port from exposing a fake
-connected network before NuttX can really own DHCP/IP/sockets.
+as `ESP_STA_IF` frames for the full-duplex SPI transport.
+
+The station control path is now partially mapped to ESP-Hosted RPCs. After the
+version/MAC identity probe succeeds, the driver sends:
+
+- `Req_WifiInit` (`278`) with ESP32-C6/ESP-IDF 5.5-style init defaults.
+- `Req_SetWifiMode` (`260`) for station mode.
+- `Req_WifiStart` (`280`).
+
+WAPI/wireless ioctl state for ESSID, passphrase, and WPA/cipher preferences is
+kept in driver RAM. A connect request sends `Req_WifiSetConfig` (`284`) with
+the configured station SSID/passphrase and then `Req_WifiConnect` (`282`).
+Disconnect sends `Req_WifiDisconnect` (`283`). Scan start sends
+`Req_WifiScanStart` (`286`), but AP result retrieval/formatting is not
+implemented yet, so `wapi scan wlan0` is still not complete. Carrier is turned
+on/off only from real `Event_StaConnected` (`775`) and
+`Event_StaDisconnected` (`776`) notifications from the coprocessor.
 
 ## RP2350-Side Pins
 
@@ -136,6 +149,7 @@ CONFIG_NET_TCP=y
 CONFIG_NET_UDP=y
 CONFIG_NET_ICMP=y
 CONFIG_NET_ARP=y
+CONFIG_NETDEVICES=y
 CONFIG_NETDEV_LATEINIT=y
 CONFIG_DRIVERS_WIRELESS=y
 CONFIG_ESP_HOSTED=y
@@ -159,8 +173,8 @@ Built locally on 2026-06-29:
 
 | Profile | Result | FLASH | RAM | Notes |
 | --- | --- | ---: | ---: | --- |
-| `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406568 B | 51060 B | Baseline image after returning from hosted config |
-| Experimental ESP-Hosted network profile | Pass | 453908 B | 65136 B | `CONFIG_ESP_HOSTED_WLAN=y`, `CONFIG_NETDEVICES=y`, station lower-half compiled |
+| `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406584 B | 51060 B | Baseline image after returning from hosted config |
+| Experimental ESP-Hosted network profile | Pass | 456156 B | 65664 B | `CONFIG_ESP_HOSTED_WLAN=y`, WLAN lower-half plus initial Wi-Fi init/start/connect/scan RPCs compiled |
 
 ## Validation Milestones
 
@@ -169,8 +183,8 @@ Built locally on 2026-06-29:
 | A | ESP32-C6 reset works from RP2350 | Partial | Scope trace or ESP firmware log after NuttX reset callback |
 | B | SPI exchanges valid ESP-Hosted control frames | In progress | Host receives valid ESP-Hosted INIT or RPC response |
 | C | NuttX gets coprocessor version/MAC | In progress | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
-| D | Scan returns AP records | Not started | `wapi scan wlan0` or equivalent returns AP list |
-| E | Connect and carrier event | Not started | Connected event toggles NuttX carrier on |
+| D | Scan returns AP records | In progress | `WifiScanStart` request is implemented; scan-done/AP-list parsing still needed |
+| E | Connect and carrier event | In progress | `WifiSetConfig`/`WifiConnect` requests and STA connected/disconnected carrier handling are implemented |
 | F | `wlan0` appears | In progress | `ifconfig wlan0` shows a registered netdev after version/MAC RPCs |
 | G | DHCP through NuttX | Not started | NuttX DHCP client assigns `wlan0` IPv4 address |
 | H | Ping works | Not started | `ping <gateway>` succeeds through `wlan0` |
@@ -193,7 +207,16 @@ Experimental ESP-Hosted build once the network config is enabled:
 ```sh
 cd /Users/fred/Documents/FruitClaw/nuttx
 ./tools/configure.sh -E -m -a ../apps adafruit-fruit-jam-rp2350:usbnsh
-make menuconfig
+for sym in CONFIG_NET CONFIG_NET_ETHERNET CONFIG_NET_IPv4 CONFIG_NET_TCP \
+  CONFIG_NET_UDP CONFIG_NET_ICMP CONFIG_NET_ARP CONFIG_NETDEVICES \
+  CONFIG_NETDEV_LATEINIT CONFIG_DRIVERS_WIRELESS CONFIG_ESP_HOSTED \
+  CONFIG_ESP_HOSTED_SPI CONFIG_ESP_HOSTED_WLAN \
+  CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED \
+  CONFIG_NETDEV_WIRELESS_IOCTL CONFIG_NETDEV_WIRELESS_HANDLER \
+  CONFIG_DRIVERS_IEEE80211 CONFIG_SCHED_HPWORK CONFIG_SPI_EXCHANGE; do
+  kconfig-tweak --enable "$sym"
+done
+make olddefconfig
 make -j8
 ```
 
@@ -210,13 +233,14 @@ wget http://<test-host>/
 
 ## Near-Term Driver Tasks
 
-1. Add RPC endpoint routing for `RPCRsp` and `RPCEvt`.
-2. Add enough protobuf encode/decode support for `GetCoprocessorFwVersion`,
-   `GetMacAddress`, `WifiInit`, and `WifiStart`.
-3. Implement version/MAC RPC requests before registering `wlan0`.
-4. Add `netdev_lowerhalf_s` registration with `NET_LL_IEEE80211` only after
-   the control plane can identify the coprocessor.
-5. Map NuttX wireless operations to ESP-Hosted RPCs for scan, connect,
-   disconnect, RSSI, MAC, and link state.
-6. Wrap NuttX TX packets as ESP-Hosted station data frames and deliver RX
-   station frames into the NuttX stack.
+1. Validate the initial `WifiInit`/`SetWifiMode`/`WifiStart` sequence against
+   a Fruit Jam ESP32-C6 running ESP-Hosted-MCU firmware.
+2. Decode `Event_StaScanDone`, fetch AP records, and format scan results for
+   WAPI.
+3. Add RSSI/link-state/MAC query support where NuttX wireless tooling expects
+   it.
+4. Verify that received `ESP_STA_IF` payloads are in the exact link-layer
+   format expected by the registered NuttX netdev type.
+5. Bring up DHCP, DNS, ping, and TCP/UDP service tests through `wlan0`.
+6. Confirm the ESP32-C6-side SPI/handshake/data-ready/reset pin mapping from
+   the Fruit Jam schematic before publishing slave firmware Kconfig values.

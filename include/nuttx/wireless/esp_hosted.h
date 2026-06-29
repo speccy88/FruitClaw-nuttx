@@ -106,7 +106,21 @@ enum esp_hosted_rpc_id_e
 enum esp_hosted_rpc_response_id_e
 {
   ESP_HOSTED_RPC_RESP_GET_MAC_ADDRESS           = 513,
+  ESP_HOSTED_RPC_RESP_SET_MODE                  = 516,
+  ESP_HOSTED_RPC_RESP_WIFI_INIT                 = 534,
+  ESP_HOSTED_RPC_RESP_WIFI_START                = 536,
+  ESP_HOSTED_RPC_RESP_WIFI_CONNECT              = 538,
+  ESP_HOSTED_RPC_RESP_WIFI_DISCONNECT           = 539,
+  ESP_HOSTED_RPC_RESP_WIFI_SET_CONFIG           = 540,
+  ESP_HOSTED_RPC_RESP_WIFI_SCAN_START           = 542,
   ESP_HOSTED_RPC_RESP_GET_COPROCESSOR_FWVERSION = 606
+};
+
+enum esp_hosted_rpc_event_id_e
+{
+  ESP_HOSTED_RPC_EVENT_STA_SCAN_DONE    = 774,
+  ESP_HOSTED_RPC_EVENT_STA_CONNECTED    = 775,
+  ESP_HOSTED_RPC_EVENT_STA_DISCONNECTED = 776
 };
 
 begin_packed_struct struct esp_hosted_payload_header_s
@@ -156,6 +170,13 @@ struct esp_hosted_stats_s
   uint32_t rpc_last_uid;
   uint32_t wlan_register_count;
   uint32_t wlan_register_error_count;
+  uint32_t wlan_control_start_count;
+  uint32_t wlan_control_start_error_count;
+  uint32_t wlan_connect_count;
+  uint32_t wlan_disconnect_count;
+  uint32_t wlan_scan_start_count;
+  uint32_t wlan_link_up_count;
+  uint32_t wlan_link_down_count;
   uint32_t netdev_tx_count;
   uint32_t netdev_tx_error_count;
   uint32_t netdev_rx_count;
