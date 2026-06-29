@@ -106,6 +106,7 @@ menuconfig ESP_HOSTED
 	default n
 	depends on NET
 	select SPI
+	select NETDEVICES
 	select DRIVERS_IEEE80211
 	select NETDEV_WIRELESS_IOCTL
 	select NETDEV_WIRELESS_HANDLER
@@ -130,7 +131,7 @@ config ESP_HOSTED_SPI
 config ESP_HOSTED_WLAN
 	bool "ESP-Hosted wlan netdev"
 	default y
-	depends on ESP_HOSTED_SPI
+	depends on ESP_HOSTED_SPI && NETDEVICES
 	---help---
 		Register an IEEE 802.11 wlan netdev once ESP-Hosted transport and
 		control-plane initialization are implemented and verified.

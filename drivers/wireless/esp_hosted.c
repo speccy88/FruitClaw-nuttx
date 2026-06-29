@@ -36,7 +36,11 @@
 
 #include <nuttx/arch.h>
 #include <nuttx/debug.h>
+#include <nuttx/mm/iob.h>
+#include <nuttx/mutex.h>
+#include <nuttx/net/netdev_lowerhalf.h>
 #include <nuttx/sched.h>
+#include <nuttx/spinlock.h>
 #include <nuttx/wqueue.h>
 #include <nuttx/wireless/esp_hosted.h>
 
@@ -74,6 +78,8 @@
 #define ESP_HOSTED_WIFI_IF_STA           0
 #define ESP_HOSTED_RPC_PAYLOAD_MAX       128
 #define ESP_HOSTED_IDF_TARGET_MAX        16
+#define ESP_HOSTED_NETDEV_RX_QUOTA       4
+#define ESP_HOSTED_NETDEV_TX_QUOTA       2
 
 /****************************************************************************
  * Private Types
@@ -104,9 +110,17 @@ struct esp_hosted_fwversion_s
 
 struct esp_hosted_driver_s
 {
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  struct netdev_lowerhalf_s lower;
+#endif
   struct esp_hosted_config_s config;
   struct esp_hosted_stats_s stats;
   struct work_s rx_work;
+  mutex_t lock;
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  netpkt_queue_t rx_queue;
+  spinlock_t rx_lock;
+#endif
   struct esp_hosted_fwversion_s fwversion;
   uint32_t rpc_uid;
   volatile bool dataready_seen;
@@ -115,9 +129,17 @@ struct esp_hosted_driver_s
   bool startup_probe_sent;
   bool have_mac;
   bool have_fwversion;
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  bool wlan_registered;
+  bool ifup;
+  bool carrier_on;
+#endif
   uint16_t seq_num;
   uint8_t mac[ESP_HOSTED_MAC_SIZE];
   uint8_t rpc_payload[ESP_HOSTED_RPC_PAYLOAD_MAX];
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  uint8_t netdev_tx_payload[ESP_HOSTED_MAX_PAYLOAD];
+#endif
   uint8_t tx_frame[ESP_HOSTED_SPI_MAX_FRAME];
   uint8_t rx_frame[ESP_HOSTED_SPI_MAX_FRAME];
 };
@@ -133,6 +155,52 @@ static struct esp_hosted_driver_s g_esp_hosted;
  ****************************************************************************/
 
 static void esp_hosted_rx_work(FAR void *arg);
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+static int esp_hosted_wlan_ifup(FAR struct netdev_lowerhalf_s *dev);
+static int esp_hosted_wlan_ifdown(FAR struct netdev_lowerhalf_s *dev);
+static int esp_hosted_wlan_transmit(FAR struct netdev_lowerhalf_s *dev,
+                                    FAR netpkt_t *pkt);
+static FAR netpkt_t *esp_hosted_wlan_receive(
+  FAR struct netdev_lowerhalf_s *dev);
+#  ifdef CONFIG_NETDEV_IOCTL
+static int esp_hosted_wlan_ioctl(FAR struct netdev_lowerhalf_s *dev,
+                                 int cmd, unsigned long arg);
+#  endif
+static void esp_hosted_wlan_reclaim(FAR struct netdev_lowerhalf_s *dev);
+static int esp_hosted_wlan_connect(FAR struct netdev_lowerhalf_s *dev);
+static int esp_hosted_wlan_disconnect(FAR struct netdev_lowerhalf_s *dev);
+static int esp_hosted_wlan_scan(FAR struct netdev_lowerhalf_s *dev,
+                                FAR struct iwreq *iwr, bool set);
+static int esp_hosted_wlan_range(FAR struct netdev_lowerhalf_s *dev,
+                                 FAR struct iwreq *iwr);
+#endif
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+static const struct netdev_ops_s g_esp_hosted_netdev_ops =
+{
+  .ifup    = esp_hosted_wlan_ifup,
+  .ifdown  = esp_hosted_wlan_ifdown,
+  .transmit = esp_hosted_wlan_transmit,
+  .receive = esp_hosted_wlan_receive,
+#  ifdef CONFIG_NETDEV_IOCTL
+  .ioctl   = esp_hosted_wlan_ioctl,
+#  endif
+  .reclaim = esp_hosted_wlan_reclaim,
+};
+
+static const struct wireless_ops_s g_esp_hosted_wireless_ops =
+{
+  .connect    = esp_hosted_wlan_connect,
+  .disconnect = esp_hosted_wlan_disconnect,
+  .scan       = esp_hosted_wlan_scan,
+  .range      = esp_hosted_wlan_range,
+};
+#endif
 
 /****************************************************************************
  * Private Functions
@@ -325,6 +393,112 @@ static uint32_t esp_hosted_next_rpc_uid(FAR struct esp_hosted_driver_s *priv)
   return priv->rpc_uid;
 }
 
+#ifdef CONFIG_ESP_HOSTED_WLAN
+static void esp_hosted_wlan_clear_rx_queue(
+  FAR struct esp_hosted_driver_s *priv)
+{
+  FAR netpkt_t *pkt;
+  irqstate_t flags;
+
+  flags = spin_lock_irqsave(&priv->rx_lock);
+  while ((pkt = netpkt_remove_queue(&priv->rx_queue)) != NULL)
+    {
+      spin_unlock_irqrestore(&priv->rx_lock, flags);
+      netpkt_free(&priv->lower, pkt, NETPKT_RX);
+      flags = spin_lock_irqsave(&priv->rx_lock);
+    }
+
+  spin_unlock_irqrestore(&priv->rx_lock, flags);
+}
+
+static int esp_hosted_try_register_wlan(FAR struct esp_hosted_driver_s *priv)
+{
+  FAR struct net_driver_s *netdev;
+  int ret;
+
+  if (priv->wlan_registered || !priv->have_mac || !priv->have_fwversion)
+    {
+      return OK;
+    }
+
+  priv->lower.ops = &g_esp_hosted_netdev_ops;
+#ifdef CONFIG_NETDEV_WIRELESS_HANDLER
+  priv->lower.iw_ops = &g_esp_hosted_wireless_ops;
+#endif
+  priv->lower.quota[NETPKT_RX] = ESP_HOSTED_NETDEV_RX_QUOTA;
+  priv->lower.quota[NETPKT_TX] = ESP_HOSTED_NETDEV_TX_QUOTA;
+  priv->lower.rxtype = NETDEV_RX_WORK;
+
+  netdev = &priv->lower.netdev;
+  memcpy(netdev->d_mac.ether.ether_addr_octet, priv->mac,
+         ESP_HOSTED_MAC_SIZE);
+
+  ret = netdev_lower_register(&priv->lower, NET_LL_IEEE80211);
+  if (ret < 0)
+    {
+      priv->stats.wlan_register_error_count++;
+      nwarn("ESP-Hosted wlan netdev register failed: %d\n", ret);
+      return ret;
+    }
+
+  priv->wlan_registered = true;
+  priv->stats.wlan_register_count++;
+
+  netdev_lower_carrier_off(&priv->lower);
+
+  ninfo("ESP-Hosted wlan netdev registered: "
+        "%02x:%02x:%02x:%02x:%02x:%02x\n",
+        priv->mac[0], priv->mac[1], priv->mac[2],
+        priv->mac[3], priv->mac[4], priv->mac[5]);
+
+  return OK;
+}
+
+static int esp_hosted_queue_sta_frame(FAR struct esp_hosted_driver_s *priv,
+                                      FAR const uint8_t *payload,
+                                      uint16_t len)
+{
+  FAR netpkt_t *pkt;
+  irqstate_t flags;
+  int ret;
+
+  if (!priv->wlan_registered)
+    {
+      priv->stats.netdev_rx_dropped_count++;
+      return OK;
+    }
+
+  pkt = netpkt_alloc(&priv->lower, NETPKT_RX);
+  if (pkt == NULL)
+    {
+      priv->stats.netdev_rx_dropped_count++;
+      return -ENOMEM;
+    }
+
+  ret = netpkt_copyin(&priv->lower, pkt, payload, len, 0);
+  if (ret < 0)
+    {
+      priv->stats.netdev_rx_dropped_count++;
+      netpkt_free(&priv->lower, pkt, NETPKT_RX);
+      return ret;
+    }
+
+  flags = spin_lock_irqsave(&priv->rx_lock);
+  ret = netpkt_tryadd_queue(pkt, &priv->rx_queue);
+  spin_unlock_irqrestore(&priv->rx_lock, flags);
+  if (ret < 0)
+    {
+      priv->stats.netdev_rx_dropped_count++;
+      netpkt_free(&priv->lower, pkt, NETPKT_RX);
+      return ret;
+    }
+
+  priv->stats.netdev_rx_count++;
+  netdev_lower_rxready(&priv->lower);
+  return OK;
+}
+#endif
+
 static int esp_hosted_parse_rpc_message(FAR const uint8_t *payload,
                                         uint16_t len,
                                         FAR struct esp_hosted_rpc_message_s
@@ -511,6 +685,10 @@ static int esp_hosted_parse_mac_response(FAR struct esp_hosted_driver_s *priv,
         "\n",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], resp);
 
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  esp_hosted_try_register_wlan(priv);
+#endif
+
   return OK;
 }
 
@@ -669,6 +847,10 @@ static int esp_hosted_parse_fwversion_response(
         " target=%s chip=%" PRIu32 " resp=%" PRId32 "\n",
         version.major, version.minor, version.patch, version.idf_target,
         version.chip_id, version.resp);
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  esp_hosted_try_register_wlan(priv);
+#endif
 
   return OK;
 }
@@ -964,6 +1146,9 @@ static int esp_hosted_parse_rx_frame(FAR struct esp_hosted_driver_s *priv,
     {
       case ESP_HOSTED_STA_IF:
         priv->stats.rx_sta_count++;
+#ifdef CONFIG_ESP_HOSTED_WLAN
+        ret = esp_hosted_queue_sta_frame(priv, payload, len);
+#endif
         break;
 
       case ESP_HOSTED_AP_IF:
@@ -1105,11 +1290,177 @@ static int esp_hosted_spi_exchange_frame(FAR struct esp_hosted_driver_s *priv,
   return OK;
 }
 
+#ifdef CONFIG_ESP_HOSTED_WLAN
+static int esp_hosted_wlan_ifup(FAR struct netdev_lowerhalf_s *dev)
+{
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+
+  priv->ifup = true;
+
+  if (!priv->carrier_on)
+    {
+      netdev_lower_carrier_off(&priv->lower);
+    }
+
+  return OK;
+}
+
+static int esp_hosted_wlan_ifdown(FAR struct netdev_lowerhalf_s *dev)
+{
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+
+  priv->ifup = false;
+  priv->carrier_on = false;
+  netdev_lower_carrier_off(&priv->lower);
+  esp_hosted_wlan_clear_rx_queue(priv);
+  return OK;
+}
+
+static int esp_hosted_wlan_transmit(FAR struct netdev_lowerhalf_s *dev,
+                                    FAR netpkt_t *pkt)
+{
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  unsigned int len;
+  int parse_ret;
+  int ret;
+
+  if (!priv->ifup)
+    {
+      priv->stats.netdev_tx_error_count++;
+      return -ENETDOWN;
+    }
+
+  len = netpkt_getdatalen(dev, pkt);
+  if (len > ESP_HOSTED_MAX_PAYLOAD)
+    {
+      priv->stats.netdev_tx_error_count++;
+      return -EMSGSIZE;
+    }
+
+  ret = nxmutex_lock(&priv->lock);
+  if (ret < 0)
+    {
+      priv->stats.netdev_tx_error_count++;
+      return ret;
+    }
+
+  ret = netpkt_copyout(dev, priv->netdev_tx_payload, pkt, len, 0);
+  if (ret < 0)
+    {
+      nxmutex_unlock(&priv->lock);
+      priv->stats.netdev_tx_error_count++;
+      return ret;
+    }
+
+  esp_hosted_build_header(priv, priv->tx_frame, ESP_HOSTED_STA_IF, 0, 0,
+                          priv->netdev_tx_payload, len);
+  memset(priv->rx_frame, 0, sizeof(priv->rx_frame));
+
+  ret = esp_hosted_spi_exchange_frame(priv, priv->tx_frame, priv->rx_frame);
+  if (ret >= 0)
+    {
+      parse_ret = esp_hosted_parse_rx_frame(priv, priv->rx_frame);
+      if (parse_ret < 0)
+        {
+          nwarn("ESP-Hosted STA TX side RX parse failed: %d\n", parse_ret);
+        }
+    }
+
+  nxmutex_unlock(&priv->lock);
+
+  if (ret < 0)
+    {
+      priv->stats.netdev_tx_error_count++;
+      return ret;
+    }
+
+  priv->stats.netdev_tx_count++;
+  netpkt_free(dev, pkt, NETPKT_TX);
+  netdev_lower_txdone(dev);
+  return OK;
+}
+
+static FAR netpkt_t *esp_hosted_wlan_receive(
+  FAR struct netdev_lowerhalf_s *dev)
+{
+  FAR struct esp_hosted_driver_s *priv =
+    (FAR struct esp_hosted_driver_s *)dev;
+  FAR netpkt_t *pkt;
+  irqstate_t flags;
+
+  flags = spin_lock_irqsave(&priv->rx_lock);
+  pkt = netpkt_remove_queue(&priv->rx_queue);
+  spin_unlock_irqrestore(&priv->rx_lock, flags);
+
+  return pkt;
+}
+
+#ifdef CONFIG_NETDEV_IOCTL
+static int esp_hosted_wlan_ioctl(FAR struct netdev_lowerhalf_s *dev,
+                                 int cmd, unsigned long arg)
+{
+  UNUSED(dev);
+  UNUSED(cmd);
+  UNUSED(arg);
+
+  return -ENOTTY;
+}
+#endif
+
+static void esp_hosted_wlan_reclaim(FAR struct netdev_lowerhalf_s *dev)
+{
+  UNUSED(dev);
+}
+
+static int esp_hosted_wlan_connect(FAR struct netdev_lowerhalf_s *dev)
+{
+  UNUSED(dev);
+
+  return -ENOSYS;
+}
+
+static int esp_hosted_wlan_disconnect(FAR struct netdev_lowerhalf_s *dev)
+{
+  UNUSED(dev);
+
+  return -ENOSYS;
+}
+
+static int esp_hosted_wlan_scan(FAR struct netdev_lowerhalf_s *dev,
+                                FAR struct iwreq *iwr, bool set)
+{
+  UNUSED(dev);
+  UNUSED(iwr);
+  UNUSED(set);
+
+  return -ENOSYS;
+}
+
+static int esp_hosted_wlan_range(FAR struct netdev_lowerhalf_s *dev,
+                                 FAR struct iwreq *iwr)
+{
+  UNUSED(dev);
+  UNUSED(iwr);
+
+  return -ENOSYS;
+}
+#endif
+
 static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
                                        uint32_t request_id)
 {
   size_t payload_len;
+  int parse_ret;
   int ret;
+
+  ret = nxmutex_lock(&priv->lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
 
   ret = esp_hosted_build_rpc_request(priv, request_id, priv->rpc_payload,
                                      sizeof(priv->rpc_payload),
@@ -1117,6 +1468,7 @@ static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
   if (ret < 0)
     {
       priv->stats.rpc_malformed_count++;
+      nxmutex_unlock(&priv->lock);
       return ret;
     }
 
@@ -1127,6 +1479,7 @@ static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
   ret = esp_hosted_spi_exchange_frame(priv, priv->tx_frame, priv->rx_frame);
   if (ret < 0)
     {
+      nxmutex_unlock(&priv->lock);
       return ret;
     }
 
@@ -1137,7 +1490,9 @@ static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
         " len=%zu\n",
         request_id, priv->stats.rpc_last_uid, payload_len);
 
-  return esp_hosted_parse_rx_frame(priv, priv->rx_frame);
+  parse_ret = esp_hosted_parse_rx_frame(priv, priv->rx_frame);
+  nxmutex_unlock(&priv->lock);
+  return parse_ret;
 }
 
 static void esp_hosted_run_startup_probe(FAR struct esp_hosted_driver_s *priv)
@@ -1169,6 +1524,13 @@ static void esp_hosted_run_startup_probe(FAR struct esp_hosted_driver_s *priv)
 static int esp_hosted_exchange_dummy(FAR struct esp_hosted_driver_s *priv)
 {
   int ret;
+  int parse_ret;
+
+  ret = nxmutex_lock(&priv->lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
 
   esp_hosted_build_dummy(priv, priv->tx_frame);
   memset(priv->rx_frame, 0, sizeof(priv->rx_frame));
@@ -1176,10 +1538,13 @@ static int esp_hosted_exchange_dummy(FAR struct esp_hosted_driver_s *priv)
   ret = esp_hosted_spi_exchange_frame(priv, priv->tx_frame, priv->rx_frame);
   if (ret < 0)
     {
+      nxmutex_unlock(&priv->lock);
       return ret;
     }
 
-  return esp_hosted_parse_rx_frame(priv, priv->rx_frame);
+  parse_ret = esp_hosted_parse_rx_frame(priv, priv->rx_frame);
+  nxmutex_unlock(&priv->lock);
+  return parse_ret;
 }
 
 static void esp_hosted_drain_rx(FAR struct esp_hosted_driver_s *priv)
@@ -1294,10 +1659,14 @@ int esp_hosted_spi_initialize(FAR const struct esp_hosted_config_s *config)
 
   memset(&g_esp_hosted, 0, sizeof(g_esp_hosted));
   g_esp_hosted.config = *config;
+  nxmutex_init(&g_esp_hosted.lock);
 
-  /* The first real milestone is ESP-Hosted INIT over SPI full duplex. Do not
-   * register a wlan netdev until that path is implemented and verified.
-   */
+#ifdef CONFIG_ESP_HOSTED_WLAN
+  spin_lock_init(&g_esp_hosted.rx_lock);
+  IOB_QINIT(&g_esp_hosted.rx_queue);
+#endif
+
+  /* Do not register wlan0 until the C6 has answered identity RPCs. */
 
   ret = esp_hosted_attach_irq(&g_esp_hosted);
   if (ret < 0)
@@ -1313,7 +1682,7 @@ int esp_hosted_spi_initialize(FAR const struct esp_hosted_config_s *config)
         esp_hosted_checksum((FAR const uint8_t *)ESP_HOSTED_RPC_EP_NAME_RSP,
                             sizeof(ESP_HOSTED_RPC_EP_NAME_RSP) - 1));
 
-  return -ENOSYS;
+  return OK;
 }
 
 int esp_hosted_spi_get_stats(FAR struct esp_hosted_stats_s *stats)

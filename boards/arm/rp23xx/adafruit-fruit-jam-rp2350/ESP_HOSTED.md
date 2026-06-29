@@ -48,13 +48,16 @@ startup probes over the serial/control interface:
 The parser recognizes `Resp_GetCoprocessorFwVersion` (`606`) and
 `Resp_GetMACAddress` (`513`), records RPC counters, and logs the firmware
 version / IDF target / chip ID and station MAC when the coprocessor returns
-valid responses. This is still control-plane bring-up only; scan, connect, and
-data-plane packet routing are not implemented yet.
+valid responses.
 
-It intentionally returns `-ENOSYS` and does not register `wlan0` until
-ESP-Hosted RPC requests/responses and the data path are implemented. That
-keeps the port from exposing a fake network interface before NuttX can really
-own DHCP/IP/sockets.
+The driver now contains the first real NuttX lower-half plumbing for the
+station data path. It allocates a `netdev_lowerhalf_s`, registers it as
+`NET_LL_IEEE80211` only after both identity RPCs succeed, queues incoming
+`ESP_STA_IF` frames into NuttX `netpkt` RX buffers, and wraps NuttX TX packets
+as `ESP_STA_IF` frames for the full-duplex SPI transport. Carrier is kept off,
+and scan/connect WAPI operations still return `-ENOSYS` until their ESP-Hosted
+RPC mappings are implemented. That keeps the port from exposing a fake
+connected network before NuttX can really own DHCP/IP/sockets.
 
 ## RP2350-Side Pins
 
@@ -150,6 +153,15 @@ CONFIG_SYSTEM_PING=y
 Additional app/service symbols should be added once `wlan0` is real:
 `wapi`, `wget`, `telnetd`, `httpd`, `ftpd`, and socket tests.
 
+## Build Evidence
+
+Built locally on 2026-06-29:
+
+| Profile | Result | FLASH | RAM | Notes |
+| --- | --- | ---: | ---: | --- |
+| `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406568 B | 51060 B | Baseline image after returning from hosted config |
+| Experimental ESP-Hosted network profile | Pass | 453908 B | 65136 B | `CONFIG_ESP_HOSTED_WLAN=y`, `CONFIG_NETDEVICES=y`, station lower-half compiled |
+
 ## Validation Milestones
 
 | ID | Milestone | Current state | Evidence needed |
@@ -159,7 +171,7 @@ Additional app/service symbols should be added once `wlan0` is real:
 | C | NuttX gets coprocessor version/MAC | In progress | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
 | D | Scan returns AP records | Not started | `wapi scan wlan0` or equivalent returns AP list |
 | E | Connect and carrier event | Not started | Connected event toggles NuttX carrier on |
-| F | `wlan0` appears | Not started | `ifconfig wlan0` shows a registered netdev |
+| F | `wlan0` appears | In progress | `ifconfig wlan0` shows a registered netdev after version/MAC RPCs |
 | G | DHCP through NuttX | Not started | NuttX DHCP client assigns `wlan0` IPv4 address |
 | H | Ping works | Not started | `ping <gateway>` succeeds through `wlan0` |
 | I | TCP client works | Not started | NuttX TCP client or `wget` succeeds |

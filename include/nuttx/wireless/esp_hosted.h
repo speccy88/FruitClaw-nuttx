@@ -154,6 +154,12 @@ struct esp_hosted_stats_s
   uint32_t rpc_last_request_id;
   uint32_t rpc_last_response_id;
   uint32_t rpc_last_uid;
+  uint32_t wlan_register_count;
+  uint32_t wlan_register_error_count;
+  uint32_t netdev_tx_count;
+  uint32_t netdev_tx_error_count;
+  uint32_t netdev_rx_count;
+  uint32_t netdev_rx_dropped_count;
 };
 
 struct esp_hosted_gpio_ops_s
