@@ -14,12 +14,6 @@
 name: "Build Documentation"
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - 'Documentation/**'
-
   pull_request:
     paths:
       - 'Documentation/**'

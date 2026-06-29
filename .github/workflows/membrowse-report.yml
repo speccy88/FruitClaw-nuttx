@@ -2,10 +2,6 @@ name: MemBrowse Memory Report
 
 on:
   pull_request:
-  push:
-    branches:
-      - master
-      - "releases/*"
 
 permissions:
   contents: read
