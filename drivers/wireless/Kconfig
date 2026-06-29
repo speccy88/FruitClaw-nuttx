@@ -119,6 +119,7 @@ config ESP_HOSTED_SPI
 	bool "ESP-Hosted SPI full-duplex transport"
 	default y
 	depends on SPI
+	select SPI_EXCHANGE
 	---help---
 		Use ESP-Hosted standard SPI full-duplex transport.  This transport
 		uses SPI plus host-controlled reset and co-processor handshake and

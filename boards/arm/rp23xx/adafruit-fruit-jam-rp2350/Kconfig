@@ -12,6 +12,17 @@ config ADAFRUIT_FRUIT_JAM_RP2350_NINA
 		Enable this later when the board port grows the ESP32-C6/NINA
 		networking path.  The first bring-up keeps networking disabled.
 
+config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+	bool "Enable ESP-Hosted ESP32-C6 wlan0 bring-up"
+	default n
+	depends on ESP_HOSTED_SPI && RP23XX_SPI1
+	select ADAFRUIT_FRUIT_JAM_RP2350_NINA
+	---help---
+		Use the onboard ESP32-C6 pins as an ESP-Hosted-MCU style Wi-Fi
+		coprocessor over SPI1.  This is the raw-frame hosted path intended
+		to become a true wlan0 NuttX network interface, not the Adafruit
+		NINA socket-command protocol.
+
 config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_DIAG
 	bool "Enable early GPIO29 boot diagnostic"
 	default n

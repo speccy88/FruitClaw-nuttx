@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #include <nuttx/fs/fs.h>
@@ -35,6 +36,12 @@
 #include <arch/board/board.h>
 
 #include "rp23xx_pico.h"
+
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+#  include <nuttx/wireless/esp_hosted.h>
+#  include "rp23xx_gpio.h"
+#  include "rp23xx_spi.h"
+#endif
 
 #ifdef CONFIG_ARCH_BOARD_COMMON
 #include "rp23xx_common_bringup.h"
@@ -57,6 +64,96 @@ static bool g_board_bringup_done;
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: fruitjam_esp_hosted_initialize
+ ****************************************************************************/
+
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+static int fruitjam_esp_hosted_reset(FAR void *arg, bool asserted)
+{
+  UNUSED(arg);
+
+  /* ESP32-C6 reset is active-low on the Fruit Jam NINA wiring. */
+
+  rp23xx_gpio_put(BOARD_NINA_RESET_PIN, !asserted);
+  return OK;
+}
+
+static bool fruitjam_esp_hosted_handshake_ready(FAR void *arg)
+{
+  UNUSED(arg);
+  return rp23xx_gpio_get(BOARD_NINA_READY_PIN);
+}
+
+static bool fruitjam_esp_hosted_data_ready(FAR void *arg)
+{
+  UNUSED(arg);
+  return rp23xx_gpio_get(BOARD_NINA_IRQ_PIN);
+}
+
+static int fruitjam_esp_hosted_attach_dataready(FAR void *arg,
+                                                xcpt_t handler,
+                                                FAR void *israrg)
+{
+  UNUSED(arg);
+
+  return rp23xx_gpio_irq_attach(BOARD_NINA_IRQ_PIN,
+                                RP23XX_GPIO_INTR_EDGE_HIGH,
+                                handler,
+                                israrg);
+}
+
+static int fruitjam_esp_hosted_enable_dataready_irq(FAR void *arg,
+                                                    bool enable)
+{
+  UNUSED(arg);
+
+  if (enable)
+    {
+      rp23xx_gpio_enable_irq(BOARD_NINA_IRQ_PIN);
+    }
+  else
+    {
+      rp23xx_gpio_disable_irq(BOARD_NINA_IRQ_PIN);
+    }
+
+  return OK;
+}
+
+static const struct esp_hosted_gpio_ops_s g_fruitjam_esp_hosted_gpio_ops =
+{
+  .reset                = fruitjam_esp_hosted_reset,
+  .handshake_ready      = fruitjam_esp_hosted_handshake_ready,
+  .data_ready           = fruitjam_esp_hosted_data_ready,
+  .attach_dataready     = fruitjam_esp_hosted_attach_dataready,
+  .enable_dataready_irq = fruitjam_esp_hosted_enable_dataready_irq,
+};
+
+static int fruitjam_esp_hosted_initialize(void)
+{
+  struct esp_hosted_config_s config;
+  FAR struct spi_dev_s *spi;
+
+  spi = rp23xx_spibus_initialize(BOARD_NINA_SPI_BUS);
+  if (spi == NULL)
+    {
+      syslog(LOG_ERR, "ERROR: failed to initialize ESP-Hosted SPI%d\n",
+             BOARD_NINA_SPI_BUS);
+      return -ENODEV;
+    }
+
+  memset(&config, 0, sizeof(config));
+  config.spi           = spi;
+  config.spi_devid     = SPIDEV_WIRELESS(0);
+  config.spi_frequency = CONFIG_ESP_HOSTED_SPI_FREQUENCY;
+  config.spi_mode      = CONFIG_ESP_HOSTED_SPI_MODE;
+  config.spi_bits      = 8;
+  config.gpio          = &g_fruitjam_esp_hosted_gpio_ops;
+
+  return esp_hosted_spi_initialize(&config);
+}
+#endif
 
 /****************************************************************************
  * Name: rp23xx_mount_tmpfs
@@ -138,6 +235,15 @@ int rp23xx_bringup(uintptr_t arg)
   if (ret < 0)
     {
       syslog(LOG_ERR, "ERROR: btn_lower_initialize() failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+  ret = fruitjam_esp_hosted_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_WARNING,
+             "WARNING: ESP-Hosted wlan0 bring-up not ready: %d\n", ret);
     }
 #endif
 
