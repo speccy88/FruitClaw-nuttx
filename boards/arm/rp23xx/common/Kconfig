@@ -143,35 +143,47 @@ endif # RP23XX_UART1
 if RP23XX_SPI0
 
 config RP23XX_SPI0_RX_GPIO
-	int "GPIO pin for SPI0 RX (0, 4, 16, or 20)"
+	int "GPIO pin for SPI0 RX"
 	default 16
-	range 0 20
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		Typical SPI0 RX pins are 0, 4, 16, 20, and on RP2350B,
+		32 and 36.
 		This line is also known as MISO when we are configured in
 		SPI master mode.
 
 config RP23XX_SPI0_CS_GPIO
-	int "GPIO pin for SPI0 CSn (1, 5, 17, or 21)"
+	int "GPIO pin for SPI0 CSn"
 	default 17
-	range 1 21
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		The common RP23xx board logic drives CS as a software GPIO,
+		so boards may use a non-native chip-select pin.
 
 
 config RP23XX_SPI0_SCK_GPIO
-	int "GPIO pin for SPI0 SCK (2, 6, 18, or 22)"
+	int "GPIO pin for SPI0 SCK"
 	default 18
-	range 2 22
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		Typical SPI0 SCK pins are 2, 6, 18, 22, and on RP2350B,
+		34 and 38.
 
 config RP23XX_SPI0_TX_GPIO
-	int "GPIO pin for SPI0 TX (3, 7, 19, or 23)"
+	int "GPIO pin for SPI0 TX"
 	default 19
-	range 3 23
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		Typical SPI0 TX pins are 3, 7, 19, 23, and on RP2350B,
+		35 and 39.
 		This line is also known as MOSI when we are configured in
 		SPI master mode.
 
@@ -182,34 +194,46 @@ endif # RP23XX_SPI0
 if RP23XX_SPI1
 
 config RP23XX_SPI1_RX_GPIO
-	int "GPIO pin for SPI1 RX (8, 12, 24, or 28)"
+	int "GPIO pin for SPI1 RX"
 	default 8
-	range 8 28
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		Typical SPI1 RX pins are 8, 12, 24, 28, and on RP2350B,
+		40 and 44.
 		This line is also known as MISO when we are configured in
 		SPI master mode, or MOSI when slave mode is configured.
 
 config RP23XX_SPI1_CS_GPIO
-	int "GPIO pin for SPI1 CSn (9, 13, 25, or 29)"
+	int "GPIO pin for SPI1 CSn"
 	default 9
-	range 9 29
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		The common RP23xx board logic drives CS as a software GPIO,
+		so boards may use a non-native chip-select pin.
 
 config RP23XX_SPI1_SCK_GPIO
-	int "GPIO pin for SPI1 SCK (10, 14, or 26)"
+	int "GPIO pin for SPI1 SCK"
 	default 10
-	range 10 26
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		Typical SPI1 SCK pins are 10, 14, 26, 30, and on RP2350B,
+		42 and 46.
 
 config RP23XX_SPI1_TX_GPIO
-	int "GPIO pin for SPI1 TX (11, 15, or 27)"
+	int "GPIO pin for SPI1 TX"
 	default 11
-	range 11 27
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		Refer to board documentation to see which pins are available.
+		Typical SPI1 TX pins are 11, 15, 27, 31, and on RP2350B,
+		43 and 47.
 		This line is also known as MOSI when we are configured in
 		SPI master mode, or MISO when slave mode is configured.
 
@@ -509,17 +533,19 @@ endif # RP23XX_I2S
 if RP23XX_BOARD_HAS_WS2812
 
 config RP23XX_WS2812_GPIO_PIN
-	int "GPIO pin for ws2812 data line (0-29)"
+	int "GPIO pin for ws2812 data line"
 	default 0
-	range 0 29
+	range 0 47 if RP23XX_RP2350B
+	range 0 29 if !RP23XX_RP2350B
 	---help---
 		This is the GPIO pin used to send data to the
 		configured ws2812 pixels.
 
 config RP23XX_WS2812_PWR_GPIO
-	int "GPIO pin for ws2812 power (0-29, or -1 if not used)"
+	int "GPIO pin for ws2812 power (-1 if not used)"
 	default -1
-	range -1 29
+	range -1 47 if RP23XX_RP2350B
+	range -1 29 if !RP23XX_RP2350B
 	---help---
 		Some RP23XX boards have an on-board ws2812
 		that is powered by a GPIO pin.  Set this

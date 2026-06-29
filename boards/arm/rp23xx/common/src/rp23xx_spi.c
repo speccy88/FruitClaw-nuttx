@@ -87,6 +87,16 @@ uint8_t rp23xx_spi0status(struct spi_dev_s *dev, uint32_t devid)
   return ret;
 }
 
+#ifdef CONFIG_SPI_CALLBACK
+int rp23xx_spi0register(struct spi_dev_s *dev,
+                        spi_mediachange_t callback,
+                        void *arg)
+{
+  spiinfo("SPI0 media change callbacks are not supported\n");
+  return OK;
+}
+#endif
+
 #ifdef CONFIG_SPI_CMDDATA
 int rp23xx_spi0cmddata(struct spi_dev_s *dev, uint32_t devid, bool cmd)
 {
@@ -127,6 +137,16 @@ uint8_t rp23xx_spi1status(struct spi_dev_s *dev, uint32_t devid)
 #  endif
   return ret;
 }
+
+#ifdef CONFIG_SPI_CALLBACK
+int rp23xx_spi1register(struct spi_dev_s *dev,
+                        spi_mediachange_t callback,
+                        void *arg)
+{
+  spiinfo("SPI1 media change callbacks are not supported\n");
+  return OK;
+}
+#endif
 
 #ifdef CONFIG_SPI_CMDDATA
 int rp23xx_spi1cmddata(struct spi_dev_s *dev, uint32_t devid, bool cmd)

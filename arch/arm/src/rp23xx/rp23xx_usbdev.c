@@ -2103,10 +2103,12 @@ int usbdev_register(struct usbdevclass_driver_s *driver)
   putreg32(RP23XX_USBCTRL_REGS_MAIN_CTRL_CONTROLLER_EN,
            RP23XX_USBCTRL_REGS_MAIN_CTRL);
 
-  /* Enable interrupt */
+  /* Enable interrupt.  Preserve PULLUP_EN, which the class driver may set
+   * during CLASS_BIND via DEV_CONNECT().
+   */
 
-  putreg32(RP23XX_USBCTRL_REGS_SIE_CTRL_EP0_INT_1BUF,
-           RP23XX_USBCTRL_REGS_SIE_CTRL);
+  setbits_reg32(RP23XX_USBCTRL_REGS_SIE_CTRL_EP0_INT_1BUF,
+                RP23XX_USBCTRL_REGS_SIE_CTRL);
   putreg32(RP23XX_USBCTRL_REGS_INTR_BUFF_STATUS |
            RP23XX_USBCTRL_REGS_INTR_BUS_RESET |
            RP23XX_USBCTRL_REGS_INTR_SETUP_REQ,

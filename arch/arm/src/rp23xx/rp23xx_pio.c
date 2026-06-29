@@ -58,9 +58,9 @@
 static spinlock_t pio_lock;
 #endif
 
-static uint8_t claimed;
+static uint8_t claimed[(RP23XX_PIO_NUM * RP23XX_PIO_SM_NUM + 7) / 8];
 
-static uint32_t _used_instruction_space[2];
+static uint32_t _used_instruction_space[RP23XX_PIO_NUM];
 
 /****************************************************************************
  * Private Functions
@@ -199,12 +199,12 @@ void rp23xx_pio_sm_claim(uint32_t pio, uint32_t sm)
 
   if (which)
     {
-      hw_claim_or_assert(&claimed, RP23XX_PIO_SM_NUM + sm,
-                         "PIO 1 SM (%d - 4) already claimed");
+      hw_claim_or_assert(claimed, which * RP23XX_PIO_SM_NUM + sm,
+                         "PIO SM already claimed");
     }
   else
     {
-      hw_claim_or_assert(&claimed, sm,
+      hw_claim_or_assert(claimed, sm,
                          "PIO 0 SM %d already claimed");
     }
 }
@@ -224,16 +224,16 @@ void rp23xx_pio_sm_unclaim(uint32_t pio, uint32_t sm)
 {
   check_sm_param(sm);
   uint32_t which = rp23xx_pio_get_index(pio);
-  hw_claim_clear(&claimed, which * RP23XX_PIO_SM_NUM + sm);
+  hw_claim_clear(claimed, which * RP23XX_PIO_SM_NUM + sm);
 }
 
 int rp23xx_pio_claim_unused_sm(uint32_t pio, bool required)
 {
-  /* PIO index is 0 or 1. */
+  /* PIO index is 0, 1, or 2. */
 
   uint32_t which = rp23xx_pio_get_index(pio);
   uint32_t base = which * RP23XX_PIO_SM_NUM;
-  int index = hw_claim_unused_from_range((uint8_t *)&claimed, required, base,
+  int index = hw_claim_unused_from_range(claimed, required, base,
                                       base + RP23XX_PIO_SM_NUM - 1,
                                       "No PIO state machines are available");
   return index >= (int)base ? index - (int)base : -1;

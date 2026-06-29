@@ -1,0 +1,94 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+if ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
+
+config ADAFRUIT_FRUIT_JAM_RP2350_NINA
+	bool "Enable onboard ESP32-C6 NINA wiring"
+	default n
+	---help---
+		Enable this later when the board port grows the ESP32-C6/NINA
+		networking path.  The first bring-up keeps networking disabled.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_DIAG
+	bool "Enable early GPIO29 boot diagnostic"
+	default n
+	---help---
+		Drive the active-low red LED as soon as the board-specific early
+		initialization hook runs.  This is useful while bringing up USB
+		console images that may fail before a serial console is available.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS
+	bool "Mount baked example scripts at /examples"
+	default n
+	depends on !DISABLE_MOUNTPOINT
+	select FS_ROMFS
+	---help---
+		Mount a board-local ROMFS image containing Fruit Jam helper
+		scripts and demonstrations at /examples.
+
+if ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS
+
+config RP23XX_ROMFS_ROMDISK_MINOR
+	int "ROMFS RAM disk minor"
+	default 0
+
+config RP23XX_ROMFS_ROMDISK_DEVNAME
+	string "ROMFS RAM disk device name"
+	default "/dev/ram0"
+
+config RP23XX_ROMFS_ROMDISK_SECTSIZE
+	int "ROMFS RAM disk sector size"
+	default 512
+
+config RP23XX_ROMFS_MOUNT_MOUNTPOINT
+	string "ROMFS mount point"
+	default "/examples"
+
+endif
+
+config RP23XX_WS2812_GPIO_PIN
+	default 32 if RP23XX_BOARD_HAS_WS2812
+
+config RP23XX_WS2812_PWR_GPIO
+	default -1 if RP23XX_BOARD_HAS_WS2812
+
+config WS2812_LED_COUNT
+	default 5 if RP23XX_BOARD_HAS_WS2812
+
+config RP23XX_I2C0_SDA_GPIO
+	default 20 if RP23XX_I2C0
+
+config RP23XX_I2C0_SCL_GPIO
+	default 21 if RP23XX_I2C0
+
+config RP23XX_SPI0_RX_GPIO
+	default 36 if RP23XX_SPI0
+
+config RP23XX_SPI0_CS_GPIO
+	default 39 if RP23XX_SPI0
+
+config RP23XX_SPI0_SCK_GPIO
+	default 34 if RP23XX_SPI0
+
+config RP23XX_SPI0_TX_GPIO
+	default 35 if RP23XX_SPI0
+
+config RP23XX_SPI1_RX_GPIO
+	default 28 if RP23XX_SPI1
+
+config RP23XX_SPI1_CS_GPIO
+	default 46 if RP23XX_SPI1
+
+config RP23XX_SPI1_SCK_GPIO
+	default 30 if RP23XX_SPI1
+
+config RP23XX_SPI1_TX_GPIO
+	default 31 if RP23XX_SPI1
+
+config RP23XX_SPISD_SPI_CH
+	default 0 if RP23XX_SPISD
+
+endif

@@ -26,6 +26,7 @@
 
 #include <rp23xx_ws2812.h>
 
+#include <errno.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <string.h>
@@ -170,6 +171,8 @@ static int my_open(struct file *filep)
   struct ws2812_dev_s  *dev_data  = inode->i_private;
   struct instance      *priv      = (struct instance *)dev_data->private;
   rp23xx_pio_sm_config  config;
+  uint32_t              pio_gpio_base;
+  uint32_t              pio_pin;
   int                   divisor;
   int                   ret;
   irqstate_t            flags;
@@ -189,6 +192,12 @@ static int my_open(struct file *filep)
     }
 
   ledinfo("rp23xx_ws2812 open dev: 0x%p\n", dev_data);
+
+  if (dev_data->port >= RP23XX_GPIO_NUM)
+    {
+      ret = -EINVAL;
+      goto post_and_return;
+    }
 
   /* Allocate the pixel buffer */
 
@@ -235,21 +244,32 @@ static int my_open(struct file *filep)
 
   if (priv->pio >= RP23XX_PIO_NUM)
     {
-      kmm_free(priv->pixels);
-
       ret = -ENOMEM;
       goto post_and_return;
     }
 
   /* ==== configure the pio state machine ==== */
 
-  /* Configure our pin as used by PIO for output */
+  /* GPIO32 and above are reached through PIO's virtual GPIO base. */
+
+#ifdef CONFIG_RP23XX_RP2350B
+  pio_gpio_base = dev_data->port >=
+                  (RP23XX_PIO_GPIOBASE_16 + 16) ?
+                  RP23XX_PIO_GPIOBASE_16 : RP23XX_PIO_GPIOBASE_0;
+#else
+  pio_gpio_base = RP23XX_PIO_GPIOBASE_0;
+#endif
+
+  rp23xx_pio_set_gpio_base(priv->pio, pio_gpio_base);
+  pio_pin = rp23xx_pio_gpio_to_pin(priv->pio, dev_data->port);
+
+  /* Configure our system GPIO as used by PIO for output. */
 
   rp23xx_pio_gpio_init(priv->pio, dev_data->port);
 
   rp23xx_pio_sm_set_consecutive_pindirs(priv->pio,
                                         priv->pio_sm,
-                                        dev_data->port,
+                                        pio_pin,
                                         1,
                                         true);
 
@@ -294,9 +314,9 @@ static int my_open(struct file *filep)
 
   rp23xx_sm_config_set_sideset(&config, 1, false, false);
 
-  /* Configure our chosen GPIO pin (in "port") as side-set output */
+  /* Configure our chosen virtual pin as side-set output. */
 
-  rp23xx_sm_config_set_sideset_pins(&config, dev_data->port);
+  rp23xx_sm_config_set_sideset_pins(&config, pio_pin);
 
   /* Load the configuration into the state machine. */
 
@@ -321,6 +341,17 @@ static int my_open(struct file *filep)
   ret = OK;
 
 post_and_return:
+  if (ret != OK)
+    {
+      priv->open_count -= 1;
+
+      if (priv->pixels != NULL)
+        {
+          kmm_free(priv->pixels);
+          priv->pixels = NULL;
+        }
+    }
+
   leave_critical_section(flags);
   return ret;
 }

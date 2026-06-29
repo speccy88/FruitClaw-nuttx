@@ -28,6 +28,9 @@
 #include <nuttx/spinlock.h>
 
 #include <sys/types.h>
+#ifdef CONFIG_CDCACM_BOOTSEL_TOUCH
+#  include <sys/boardctl.h>
+#endif
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -42,6 +45,10 @@
 #include <nuttx/kmalloc.h>
 #include <nuttx/queue.h>
 #include <nuttx/wdog.h>
+#ifdef CONFIG_CDCACM_BOOTSEL_TOUCH
+#  include <nuttx/clock.h>
+#  include <nuttx/wqueue.h>
+#endif
 #include <nuttx/arch.h>
 #include <nuttx/serial/serial.h>
 
@@ -67,6 +74,11 @@
  */
 
 #define CDCACM_RXDELAY   (CLK_TCK / 5)
+
+#ifdef CONFIG_CDCACM_BOOTSEL_TOUCH
+#  define CDCACM_BOOTSEL_TOUCH_DELAY \
+    MSEC2TICK(CONFIG_CDCACM_BOOTSEL_TOUCH_DELAY_MS)
+#endif
 
 /****************************************************************************
  * Private Types
@@ -111,6 +123,10 @@ struct cdcacm_dev_s
 
   struct cdc_linecoding_s linecoding;  /* Buffered line status */
   cdcacm_callback_t callback;          /* Serial event callback function */
+
+#ifdef CONFIG_CDCACM_BOOTSEL_TOUCH
+  struct work_s bootsel_work;          /* Delayed BOOTSEL reset work */
+#endif
 
   FAR struct usbdev_ep_s *epintin;     /* Interrupt IN endpoint structure */
   FAR struct usbdev_ep_s *epbulkin;    /* Bulk IN endpoint structure */
@@ -188,6 +204,11 @@ static int     cdcacm_serialstate(FAR struct cdcacm_dev_s *priv);
 /* Configuration ************************************************************/
 
 static void    cdcacm_resetconfig(FAR struct cdcacm_dev_s *priv);
+#ifdef CONFIG_CDCACM_BOOTSEL_TOUCH
+static void    cdcacm_bootsel_worker(FAR void *arg);
+static void    cdcacm_check_bootsel_touch(FAR struct cdcacm_dev_s *priv,
+                 uint8_t oldctrlline, uint8_t newctrlline);
+#endif
 static int     cdcacm_epconfigure(FAR struct usbdev_ep_s *ep,
                  enum cdcacm_epdesc_e epid, bool last,
                  FAR struct usbdev_devinfo_s *devinfo,
@@ -817,6 +838,62 @@ errout_with_flags:
   priv->serialstate &= CDC_UART_CONSISTENT;
 
   return ret;
+}
+#endif
+
+/****************************************************************************
+ * Name: cdcacm_linecoding_baud
+ *
+ * Description:
+ *   Return the host-provided CDC line-coding baud rate.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_CDCACM_BOOTSEL_TOUCH
+static uint32_t cdcacm_linecoding_baud(
+              FAR const struct cdc_linecoding_s *linecoding)
+{
+  return (uint32_t)linecoding->baud[0] |
+         ((uint32_t)linecoding->baud[1] << 8) |
+         ((uint32_t)linecoding->baud[2] << 16) |
+         ((uint32_t)linecoding->baud[3] << 24);
+}
+
+/****************************************************************************
+ * Name: cdcacm_bootsel_worker
+ *
+ * Description:
+ *   Worker-thread context for the CDC 1200-baud reset hook.
+ *
+ ****************************************************************************/
+
+static void cdcacm_bootsel_worker(FAR void *arg)
+{
+  boardctl(BOARDIOC_RESET, CONFIG_CDCACM_BOOTSEL_TOUCH_RESET_STATUS);
+}
+
+/****************************************************************************
+ * Name: cdcacm_check_bootsel_touch
+ *
+ * Description:
+ *   Schedule a board reset when the host sets the configured touch baud and
+ *   drops DTR.
+ *
+ ****************************************************************************/
+
+static void cdcacm_check_bootsel_touch(FAR struct cdcacm_dev_s *priv,
+                                       uint8_t oldctrlline,
+                                       uint8_t newctrlline)
+{
+  if (cdcacm_linecoding_baud(&priv->linecoding) ==
+      CONFIG_CDCACM_BOOTSEL_TOUCH_BAUD &&
+      (oldctrlline & CDCACM_UART_DTR) != 0 &&
+      (newctrlline & CDCACM_UART_DTR) == 0 &&
+      work_available(&priv->bootsel_work))
+    {
+      work_queue(HPWORK, &priv->bootsel_work, cdcacm_bootsel_worker, priv,
+                 CDCACM_BOOTSEL_TOUCH_DELAY);
+    }
 }
 #endif
 
@@ -1880,12 +1957,20 @@ static int cdcacm_setup(FAR struct usbdevclass_driver_s *driver,
                                USB_REQ_RECIPIENT_INTERFACE) &&
                 index == priv->devinfo.ifnobase)
               {
+                uint8_t oldctrlline;
+
                 /* Save the control line state in the private data
                  * structure. Only bits 0 and 1 have meaning.  Respond with
                  * a zero length packet.
                  */
 
+                oldctrlline = priv->ctrlline;
                 priv->ctrlline = value & 3;
+
+#ifdef CONFIG_CDCACM_BOOTSEL_TOUCH
+                cdcacm_check_bootsel_touch(priv, oldctrlline,
+                                           priv->ctrlline);
+#endif
                 ret = 0;
 
                 /* If there is a registered callback to receive control line

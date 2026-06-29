@@ -2207,6 +2207,16 @@ config ARCH_BOARD_ADAFRUIT_QT_PY_RP2040
 		This is a port to the Adafruit QT Py RP2040 board.
 		Support is derived from Raspberry Pi Pico support.
 
+config ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
+	bool "Adafruit Fruit Jam RP2350 board"
+	depends on ARCH_CHIP_RP23XX
+	select ARCH_HAVE_BUTTONS
+	select ARCH_HAVE_IRQBUTTONS
+	select ARCH_HAVE_LEDS
+	---help---
+	This is a port to the Adafruit Fruit Jam RP2350B board.
+		Support is derived from Raspberry Pi Pico 2 support.
+
 config ARCH_BOARD_RASPBERRYPI_PICO_2
 	bool "Raspberry Pi Pico 2 board (not Pico, not W)"
 	depends on ARCH_CHIP_RP23XX
@@ -3878,6 +3888,7 @@ config ARCH_BOARD
 	default "adafruit-kb2040"              if ARCH_BOARD_ADAFRUIT_KB2040
 	default "adafruit-qt-py-rp2040"        if ARCH_BOARD_ADAFRUIT_QT_PY_RP2040
 	default "waveshare-rp2040-lcd-1.28"    if ARCH_BOARD_WAVESHARE_RP2040_LCD_1_28
+	default "adafruit-fruit-jam-rp2350"    if ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
 	default "raspberrypi-pico-2"           if ARCH_BOARD_RASPBERRYPI_PICO_2
 	default "raspberrypi-pico-2-rv"        if ARCH_BOARD_RASPBERRYPI_PICO_2_RV
 	default "xiao-rp2350"                  if ARCH_BOARD_XIAO_RP2350
@@ -4397,6 +4408,9 @@ source "boards/arm/rp2040/waveshare-rp2040-zero/Kconfig"
 endif
 if ARCH_BOARD_RASPBERRYPI_PICO_2
 source "boards/arm/rp23xx/raspberrypi-pico-2/Kconfig"
+endif
+if ARCH_BOARD_ADAFRUIT_FRUIT_JAM_RP2350
+source "boards/arm/rp23xx/adafruit-fruit-jam-rp2350/Kconfig"
 endif
 if ARCH_BOARD_XIAO_RP2350
 source "boards/arm/rp23xx/xiao-rp2350/Kconfig"

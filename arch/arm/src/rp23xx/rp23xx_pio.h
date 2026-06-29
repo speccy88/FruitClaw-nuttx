@@ -49,6 +49,9 @@
 
 #define PIO_INSTRUCTION_COUNT   32u
 
+#define RP23XX_PIO_GPIOBASE_0   0u
+#define RP23XX_PIO_GPIOBASE_16  16u
+
 #define valid_params_if(x, test)    DEBUGASSERT(test)
 
 #define check_sm_param(sm)   valid_params_if(PIO, sm < RP23XX_PIO_SM_NUM)
@@ -204,7 +207,7 @@ static inline void rp23xx_sm_config_set_in_pins(rp23xx_pio_sm_config *c,
  *
  * Input Parameters:
  *   c - Pointer to the configuration structure to modify
- *   sideset_base - 0-31 base pin for 'side set'
+ *   sideset_base - 0-31 virtual base pin for 'side set'
  *
  * Returned Value:
  *   None
@@ -622,7 +625,7 @@ static inline void rp23xx_pio_sm_set_config(uint32_t pio,
  *   pio - PIO index (0..2)
  *
  * Returned Value:
- *   the PIO instance number (either 0 or 1)
+ *   the PIO instance number (0..2)
  *
  ****************************************************************************/
 
@@ -630,6 +633,59 @@ static inline uint32_t rp23xx_pio_get_index(uint32_t pio)
 {
   check_pio_param(pio);
   return pio;
+}
+
+/****************************************************************************
+ * Name: rp23xx_pio_get_gpio_base
+ *
+ * Description:
+ *   Return the system GPIO mapped to PIO virtual GPIO 0.
+ *
+ ****************************************************************************/
+
+static inline uint32_t rp23xx_pio_get_gpio_base(uint32_t pio)
+{
+  check_pio_param(pio);
+  return getreg32(RP23XX_PIO_GPIOBASE(pio)) & RP23XX_PIO_GPIOBASE_MASK;
+}
+
+/****************************************************************************
+ * Name: rp23xx_pio_set_gpio_base
+ *
+ * Description:
+ *   Set the system GPIO mapped to PIO virtual GPIO 0.  On RP2350 only bases
+ *   0 and 16 are supported.
+ *
+ ****************************************************************************/
+
+static inline void rp23xx_pio_set_gpio_base(uint32_t pio, uint32_t base)
+{
+  check_pio_param(pio);
+  valid_params_if(PIO, base == RP23XX_PIO_GPIOBASE_0 ||
+                       base == RP23XX_PIO_GPIOBASE_16);
+
+  modbits_reg32(base == RP23XX_PIO_GPIOBASE_16 ?
+                RP23XX_PIO_GPIOBASE_MASK : 0,
+                RP23XX_PIO_GPIOBASE_MASK,
+                RP23XX_PIO_GPIOBASE(pio));
+}
+
+/****************************************************************************
+ * Name: rp23xx_pio_gpio_to_pin
+ *
+ * Description:
+ *   Convert a system GPIO number to the currently selected PIO virtual pin.
+ *
+ ****************************************************************************/
+
+static inline uint32_t rp23xx_pio_gpio_to_pin(uint32_t pio, uint32_t gpio)
+{
+  uint32_t base = rp23xx_pio_get_gpio_base(pio);
+
+  valid_params_if(PIO, gpio >= base);
+  valid_params_if(PIO, gpio - base < 32);
+
+  return gpio - base;
 }
 
 /****************************************************************************
@@ -657,7 +713,7 @@ static inline uint32_t rp23xx_pio_get_index(uint32_t pio)
 static inline void rp23xx_pio_gpio_init(uint32_t pio, uint32_t pin)
 {
   check_pio_param(pio);
-  valid_params_if(PIO, pin < 32);
+  valid_params_if(PIO, pin < RP23XX_GPIO_NUM);
   rp23xx_gpio_set_function(pin, pio == 0 ? RP23XX_GPIO_FUNC_PIO0 :
                                 pio == 1 ? RP23XX_GPIO_FUNC_PIO1 :
                                            RP23XX_GPIO_FUNC_PIO2);
@@ -688,7 +744,7 @@ static inline uint32_t rp23xx_pio_get_dreq(uint32_t pio, uint32_t sm,
   check_sm_param(sm);
   return sm + (is_tx ? 0 : RP23XX_PIO_SM_NUM) +
               (pio == 0 ? RP23XX_DMA_DREQ_PIO0_TX0 :
-               pio == 0 ? RP23XX_DMA_DREQ_PIO1_TX0 :
+               pio == 1 ? RP23XX_DMA_DREQ_PIO1_TX0 :
                           RP23XX_DMA_DREQ_PIO2_TX0);
 }
 

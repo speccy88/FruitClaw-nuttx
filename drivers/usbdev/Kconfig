@@ -469,6 +469,32 @@ config CDCACM_OFLOWCONTROL
 	---help---
 		Enable CDC/ACM CTS flow control
 
+config CDCACM_BOOTSEL_TOUCH
+	bool "CDC/ACM 1200-baud DTR reset hook"
+	default n
+	depends on BOARDCTL_RESET
+	select SCHED_HPWORK
+	---help---
+		Enable an Arduino-style USB CDC bootloader touch.  When the host
+		sets the CDC line coding to the configured touch baud rate and
+		then drops DTR, the CDC ACM class schedules BOARDIOC_RESET with
+		the configured reset status.
+
+config CDCACM_BOOTSEL_TOUCH_BAUD
+	int "CDC/ACM touch baud rate"
+	default 1200
+	depends on CDCACM_BOOTSEL_TOUCH
+
+config CDCACM_BOOTSEL_TOUCH_RESET_STATUS
+	int "CDC/ACM touch reset status"
+	default 3
+	depends on CDCACM_BOOTSEL_TOUCH
+
+config CDCACM_BOOTSEL_TOUCH_DELAY_MS
+	int "CDC/ACM touch reset delay in milliseconds"
+	default 100
+	depends on CDCACM_BOOTSEL_TOUCH
+
 menuconfig CDCACM_COMPOSITE
 	bool "CDC/ACM composite support"
 	default n

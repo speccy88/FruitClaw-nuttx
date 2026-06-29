@@ -24,11 +24,14 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
 #include <nuttx/debug.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 
+#include <nuttx/drivers/ramdisk.h>
 #include <nuttx/fs/fs.h>
 
 #include <arch/board/board.h>
@@ -50,7 +53,9 @@
 #endif
 
 #if defined(CONFIG_RP23XX_ROMFS_ROMDISK_DEVNAME)
-#  include <rp23xx_romfsimg.h>
+#  include <arch/board/rp23xx_romfsimg.h>
+#  define NSECTORS(b) (((b) + CONFIG_RP23XX_ROMFS_ROMDISK_SECTSIZE - 1) / \
+                       CONFIG_RP23XX_ROMFS_ROMDISK_SECTSIZE)
 #endif
 
 #if defined(CONFIG_RP23XX_BOARD_HAS_WS2812) && defined(CONFIG_WS2812)
@@ -502,6 +507,15 @@ int rp23xx_common_bringup(void)
     }
   else
     {
+      ret = mkdir(CONFIG_RP23XX_ROMFS_MOUNT_MOUNTPOINT, 0777);
+      if (ret < 0 && errno != EEXIST)
+        {
+          syslog(LOG_ERR,
+                 "ERROR: mkdir(%s) failed: %d\n",
+                 CONFIG_RP23XX_ROMFS_MOUNT_MOUNTPOINT,
+                 errno);
+        }
+
       /* Mount the file system */
 
       ret = nx_mount(CONFIG_RP23XX_ROMFS_ROMDISK_DEVNAME,

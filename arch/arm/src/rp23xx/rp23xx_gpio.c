@@ -72,7 +72,7 @@ static const int g_gpio_function_mapping_spi[2][5] =
   {
     8, 12, 24, 28,
 #ifdef CONFIG_RP23XX_RP2350B
-    40, 44
+    40, 44,
 #endif
     -1
   },     /* pin numbers assignable to SPI1 */
