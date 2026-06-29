@@ -57,6 +57,10 @@ ifeq ($(CONFIG_WL_GS2200M),y)
 CSRCS += gs2200m.c
 endif
 
+ifeq ($(CONFIG_ESP_HOSTED_SPI),y)
+CSRCS += esp_hosted.c
+endif
+
 ifeq ($(CONFIG_WL_SPIRIT),y)
 include wireless/spirit/Make.defs
 endif
