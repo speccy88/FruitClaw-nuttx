@@ -3031,14 +3031,16 @@ static bool cdcuart_txempty(FAR struct uart_dev_s *dev)
     }
 
   priv->ispolling = true;
+  spin_unlock_irqrestore(&priv->lock, flags);
+
   EP_POLL(ep);
-  priv->ispolling = false;
 
   /* When all of the allocated write requests have been returned to the
    * txfree, then there is no longer any TX data in flight.
    */
 
   flags = spin_lock_irqsave(&priv->lock);
+  priv->ispolling = false;
 
 #ifdef CONFIG_CDCACM_DISABLE_TXBUF
   /* dev->xmit.buffer always take one req, so just compare
