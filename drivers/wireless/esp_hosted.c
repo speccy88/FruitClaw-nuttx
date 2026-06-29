@@ -34,6 +34,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <net/if_arp.h>
+
 #include <nuttx/arch.h>
 #include <nuttx/debug.h>
 #include <nuttx/mm/iob.h>
@@ -102,6 +104,7 @@
 #define ESP_HOSTED_WIFI_AUTH_WPA_WPA2    4
 #define ESP_HOSTED_WIFI_AUTH_WPA3_PSK    6
 #define ESP_HOSTED_WIFI_AUTH_WPA2_WPA3   7
+#define ESP_HOSTED_SCAN_MAX_APS          12
 
 /****************************************************************************
  * Private Types
@@ -129,6 +132,18 @@ struct esp_hosted_fwversion_s
   uint32_t chip_id;
   char idf_target[ESP_HOSTED_IDF_TARGET_MAX];
 };
+
+#ifdef CONFIG_ESP_HOSTED_WLAN
+struct esp_hosted_scan_record_s
+{
+  uint8_t bssid[ESP_HOSTED_MAC_SIZE];
+  char ssid[IW_ESSID_MAX_SIZE + 1];
+  uint8_t ssid_len;
+  uint8_t channel;
+  int32_t rssi;
+  int32_t authmode;
+};
+#endif
 
 struct esp_hosted_driver_s
 {
@@ -158,13 +173,21 @@ struct esp_hosted_driver_s
   bool wlan_control_start_pending;
   bool wlan_control_started;
   bool have_ssid;
+  bool scan_in_progress;
+  bool scan_done;
+  bool scan_records_valid;
   uint32_t auth_wpa;
   uint32_t cipher_pairwise;
   uint32_t cipher_group;
+  uint32_t scan_status;
+  uint16_t scan_ap_available;
+  uint16_t scan_result_count;
+  uint16_t scan_request_count;
   uint8_t ssid_len;
   uint8_t passphrase_len;
   char ssid[IW_ESSID_MAX_SIZE + 1];
   char passphrase[ESP_HOSTED_WIFI_PASSWORD_MAX + 1];
+  struct esp_hosted_scan_record_s scan_records[ESP_HOSTED_SCAN_MAX_APS];
 #endif
   uint16_t seq_num;
   uint8_t mac[ESP_HOSTED_MAC_SIZE];
@@ -420,6 +443,26 @@ static int esp_hosted_pb_skip_field(FAR const uint8_t *buf, size_t len,
       default:
         return -EINVAL;
     }
+}
+
+static int esp_hosted_pb_get_bytes(FAR const uint8_t *buf, size_t len,
+                                   FAR size_t *offset,
+                                   FAR const uint8_t **value,
+                                   FAR size_t *value_len)
+{
+  uint64_t field_len;
+  int ret;
+
+  ret = esp_hosted_pb_get_varint(buf, len, offset, &field_len);
+  if (ret < 0 || field_len > len - *offset)
+    {
+      return -EINVAL;
+    }
+
+  *value = buf + *offset;
+  *value_len = field_len;
+  *offset += field_len;
+  return OK;
 }
 
 static int32_t esp_hosted_pb_int32(uint64_t value)
@@ -1237,6 +1280,409 @@ static int esp_hosted_parse_response_status(FAR const uint8_t *payload,
 }
 
 #ifdef CONFIG_ESP_HOSTED_WLAN
+static int esp_hosted_parse_scan_done_payload(FAR const uint8_t *payload,
+                                              size_t len,
+                                              FAR uint32_t *status,
+                                              FAR uint32_t *number,
+                                              FAR uint32_t *scan_id)
+{
+  size_t offset = 0;
+  int ret;
+
+  *status = 0;
+  *number = 0;
+  *scan_id = 0;
+
+  while (offset < len)
+    {
+      uint64_t key;
+      uint64_t value;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      switch (field)
+        {
+          case 1:
+          case 2:
+          case 3:
+            if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+            if (ret < 0)
+              {
+                return ret;
+              }
+
+            if (field == 1)
+              {
+                *status = value;
+              }
+            else if (field == 2)
+              {
+                *number = value;
+              }
+            else
+              {
+                *scan_id = value;
+              }
+            break;
+
+          default:
+            ret = esp_hosted_pb_skip_field(payload, len, &offset, wire_type);
+            if (ret < 0)
+              {
+                return ret;
+              }
+            break;
+        }
+    }
+
+  return OK;
+}
+
+static int esp_hosted_parse_sta_scan_done_event(
+  FAR struct esp_hosted_driver_s *priv, FAR const uint8_t *payload,
+  size_t len)
+{
+  FAR const uint8_t *scan_payload = NULL;
+  size_t scan_len = 0;
+  size_t offset = 0;
+  int32_t resp = 0;
+  uint32_t status = 0;
+  uint32_t number = 0;
+  uint32_t scan_id = 0;
+  int ret;
+
+  while (offset < len)
+    {
+      uint64_t key;
+      uint64_t value;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      switch (field)
+        {
+          case 1:
+            if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+            if (ret < 0)
+              {
+                return ret;
+              }
+
+            resp = esp_hosted_pb_int32(value);
+            break;
+
+          case 2:
+            if (wire_type != ESP_HOSTED_PB_WIRE_LENGTH)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_bytes(payload, len, &offset,
+                                          &scan_payload, &scan_len);
+            if (ret < 0)
+              {
+                return ret;
+              }
+            break;
+
+          default:
+            ret = esp_hosted_pb_skip_field(payload, len, &offset, wire_type);
+            if (ret < 0)
+              {
+                return ret;
+              }
+            break;
+        }
+    }
+
+  if (scan_payload != NULL)
+    {
+      ret = esp_hosted_parse_scan_done_payload(scan_payload, scan_len,
+                                               &status, &number, &scan_id);
+      if (ret < 0)
+        {
+          return ret;
+        }
+    }
+
+  priv->scan_in_progress = false;
+  priv->scan_done = true;
+  priv->scan_records_valid = false;
+  priv->scan_status = resp != 0 ? (uint32_t)resp : status;
+  priv->scan_ap_available = number > ESP_HOSTED_SCAN_MAX_APS ?
+                            ESP_HOSTED_SCAN_MAX_APS : number;
+  priv->scan_result_count = 0;
+  priv->stats.wlan_scan_done_count++;
+
+  ninfo("ESP-Hosted scan done: resp=%" PRId32 " status=%" PRIu32
+        " aps=%" PRIu32 " scan_id=%" PRIu32 "\n",
+        resp, status, number, scan_id);
+  return OK;
+}
+
+static int esp_hosted_parse_ap_record(
+  FAR struct esp_hosted_scan_record_s *record, FAR const uint8_t *payload,
+  size_t len)
+{
+  size_t offset = 0;
+  bool have_bssid = false;
+  int ret;
+
+  memset(record, 0, sizeof(*record));
+
+  while (offset < len)
+    {
+      FAR const uint8_t *value_ptr;
+      uint64_t key;
+      uint64_t value;
+      size_t value_len;
+      size_t copy_len;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      switch (field)
+        {
+          case 1:
+            if (wire_type != ESP_HOSTED_PB_WIRE_LENGTH)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_bytes(payload, len, &offset,
+                                          &value_ptr, &value_len);
+            if (ret < 0 || value_len < ESP_HOSTED_MAC_SIZE)
+              {
+                return -EINVAL;
+              }
+
+            memcpy(record->bssid, value_ptr, ESP_HOSTED_MAC_SIZE);
+            have_bssid = true;
+            break;
+
+          case 2:
+            if (wire_type != ESP_HOSTED_PB_WIRE_LENGTH)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_bytes(payload, len, &offset,
+                                          &value_ptr, &value_len);
+            if (ret < 0)
+              {
+                return ret;
+              }
+
+            copy_len = value_len;
+            if (copy_len > 0 && value_ptr[copy_len - 1] == '\0')
+              {
+                copy_len--;
+              }
+
+            if (copy_len > IW_ESSID_MAX_SIZE)
+              {
+                copy_len = IW_ESSID_MAX_SIZE;
+              }
+
+            if (copy_len > 0)
+              {
+                memcpy(record->ssid, value_ptr, copy_len);
+              }
+
+            record->ssid[copy_len] = '\0';
+            record->ssid_len = copy_len;
+            break;
+
+          case 3:
+          case 5:
+          case 6:
+            if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+            if (ret < 0)
+              {
+                return ret;
+              }
+
+            if (field == 3)
+              {
+                record->channel = value > UINT8_MAX ? UINT8_MAX : value;
+              }
+            else if (field == 5)
+              {
+                record->rssi = esp_hosted_pb_int32(value);
+              }
+            else
+              {
+                record->authmode = esp_hosted_pb_int32(value);
+              }
+            break;
+
+          default:
+            ret = esp_hosted_pb_skip_field(payload, len, &offset, wire_type);
+            if (ret < 0)
+              {
+                return ret;
+              }
+            break;
+        }
+    }
+
+  return have_bssid ? OK : -EINVAL;
+}
+
+static int esp_hosted_parse_scan_records_response(
+  FAR struct esp_hosted_driver_s *priv, FAR const uint8_t *payload,
+  size_t len)
+{
+  struct esp_hosted_scan_record_s records[ESP_HOSTED_SCAN_MAX_APS];
+  size_t offset = 0;
+  int32_t resp = 0;
+  uint32_t number = 0;
+  uint16_t count = 0;
+  int ret;
+
+  memset(records, 0, sizeof(records));
+
+  while (offset < len)
+    {
+      FAR const uint8_t *value_ptr;
+      uint64_t key;
+      uint64_t value;
+      size_t value_len;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      switch (field)
+        {
+          case 1:
+          case 2:
+            if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+            if (ret < 0)
+              {
+                return ret;
+              }
+
+            if (field == 1)
+              {
+                resp = esp_hosted_pb_int32(value);
+              }
+            else
+              {
+                number = value;
+              }
+            break;
+
+          case 3:
+            if (wire_type != ESP_HOSTED_PB_WIRE_LENGTH)
+              {
+                return -EINVAL;
+              }
+
+            ret = esp_hosted_pb_get_bytes(payload, len, &offset,
+                                          &value_ptr, &value_len);
+            if (ret < 0)
+              {
+                return ret;
+              }
+
+            if (count < ESP_HOSTED_SCAN_MAX_APS)
+              {
+                ret = esp_hosted_parse_ap_record(&records[count],
+                                                 value_ptr, value_len);
+                if (ret < 0)
+                  {
+                    return ret;
+                  }
+
+                count++;
+              }
+            break;
+
+          default:
+            ret = esp_hosted_pb_skip_field(payload, len, &offset, wire_type);
+            if (ret < 0)
+              {
+                return ret;
+              }
+            break;
+        }
+    }
+
+  if (resp != 0)
+    {
+      priv->stats.wlan_scan_get_records_error_count++;
+      nwarn("ESP-Hosted scan records failed: resp=%" PRId32 "\n", resp);
+      return -EIO;
+    }
+
+  memcpy(priv->scan_records, records, sizeof(records));
+  priv->scan_result_count = count;
+  priv->scan_ap_available = number > ESP_HOSTED_SCAN_MAX_APS ?
+                            ESP_HOSTED_SCAN_MAX_APS : number;
+  priv->scan_records_valid = true;
+  priv->scan_done = true;
+  priv->scan_in_progress = false;
+  priv->stats.wlan_scan_get_records_count++;
+  priv->stats.wlan_scan_result_count += count;
+
+  ninfo("ESP-Hosted scan records: reported=%" PRIu32 " cached=%u\n",
+        number, count);
+  return OK;
+}
+
 static int esp_hosted_parse_sta_connected_event(
   FAR struct esp_hosted_driver_s *priv, FAR const uint8_t *payload,
   size_t len)
@@ -1335,6 +1781,7 @@ static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
           case ESP_HOSTED_RPC_RESP_WIFI_DISCONNECT:
           case ESP_HOSTED_RPC_RESP_WIFI_SET_CONFIG:
           case ESP_HOSTED_RPC_RESP_WIFI_SCAN_START:
+          case ESP_HOSTED_RPC_RESP_WIFI_SCAN_GET_AP_NUM:
             ret = esp_hosted_parse_response_status(msg.payload,
                                                    msg.payload_len, &resp);
             if (ret < 0)
@@ -1356,6 +1803,14 @@ static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
                   msg.msg_id, msg.uid);
             return OK;
 
+          case ESP_HOSTED_RPC_RESP_WIFI_SCAN_GET_AP_RECORDS:
+#ifdef CONFIG_ESP_HOSTED_WLAN
+            return esp_hosted_parse_scan_records_response(priv, msg.payload,
+                                                          msg.payload_len);
+#else
+            return OK;
+#endif
+
           default:
             ninfo("ESP-Hosted RPC response: id=%" PRIu32 " uid=%" PRIu32
                   " len=%zu\n",
@@ -1370,6 +1825,10 @@ static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
       switch (msg.msg_id)
         {
 #ifdef CONFIG_ESP_HOSTED_WLAN
+          case ESP_HOSTED_RPC_EVENT_STA_SCAN_DONE:
+            return esp_hosted_parse_sta_scan_done_event(priv, msg.payload,
+                                                        msg.payload_len);
+
           case ESP_HOSTED_RPC_EVENT_STA_CONNECTED:
             return esp_hosted_parse_sta_connected_event(priv, msg.payload,
                                                         msg.payload_len);
@@ -1461,6 +1920,17 @@ static int esp_hosted_build_rpc_request(FAR struct esp_hosted_driver_s *priv,
         break;
 
       case ESP_HOSTED_RPC_WIFI_SCAN_START:
+        break;
+
+      case ESP_HOSTED_RPC_WIFI_SCAN_GET_AP_RECORDS:
+        ret = esp_hosted_pb_append_varint_field(request_payload,
+                                                sizeof(request_payload),
+                                                &request_len, 1,
+                                                priv->scan_request_count);
+        if (ret < 0)
+          {
+            return ret;
+          }
         break;
 #endif
 
@@ -2158,6 +2628,102 @@ static int esp_hosted_wlan_auth(FAR struct netdev_lowerhalf_s *dev,
   return OK;
 }
 
+static size_t esp_hosted_wlan_scan_result_len(
+  FAR const struct esp_hosted_driver_s *priv)
+{
+  size_t len = 0;
+  uint16_t i;
+
+  for (i = 0; i < priv->scan_result_count; i++)
+    {
+      len += IW_EV_LEN(ap_addr) + IW_EV_LEN(qual) +
+             IW_EV_LEN(freq) + IW_EV_LEN(data) + IW_EV_LEN(essid) +
+             ((priv->scan_records[i].ssid_len + 3) & ~3);
+    }
+
+  return len;
+}
+
+static int esp_hosted_wlan_format_scan_results(
+  FAR struct esp_hosted_driver_s *priv, FAR struct iwreq *iwr)
+{
+  FAR struct esp_hosted_scan_record_s *record;
+  FAR struct iw_event *iwe;
+  FAR char *pointer;
+  size_t need_len;
+  uint16_t i;
+
+  if (iwr == NULL)
+    {
+      return -EINVAL;
+    }
+
+  if (priv->scan_result_count == 0)
+    {
+      iwr->u.data.length = 0;
+      return OK;
+    }
+
+  need_len = esp_hosted_wlan_scan_result_len(priv);
+  if (iwr->u.data.pointer == NULL || iwr->u.data.length < need_len)
+    {
+      iwr->u.data.length = need_len;
+      return -E2BIG;
+    }
+
+  pointer = iwr->u.data.pointer;
+
+  for (i = 0; i < priv->scan_result_count; i++)
+    {
+      record = &priv->scan_records[i];
+
+      iwe = (FAR struct iw_event *)pointer;
+      iwe->cmd = SIOCGIWAP;
+      iwe->u.ap_addr.sa_family = ARPHRD_ETHER;
+      memcpy(iwe->u.ap_addr.sa_data, record->bssid, ESP_HOSTED_MAC_SIZE);
+      iwe->len = IW_EV_LEN(ap_addr);
+      pointer += iwe->len;
+
+      iwe = (FAR struct iw_event *)pointer;
+      iwe->cmd = SIOCGIWESSID;
+      iwe->u.essid.flags = 0;
+      iwe->u.essid.length = record->ssid_len;
+      iwe->u.essid.pointer = (FAR void *)sizeof(iwe->u.essid);
+      memcpy(&iwe->u.essid + 1, record->ssid, iwe->u.essid.length);
+      iwe->len = IW_EV_LEN(essid) + ((iwe->u.essid.length + 3) & ~3);
+      pointer += iwe->len;
+
+      iwe = (FAR struct iw_event *)pointer;
+      iwe->cmd = IWEVQUAL;
+      iwe->u.qual.qual = 0;
+      iwe->u.qual.level = record->rssi;
+      iwe->u.qual.noise = 0;
+      iwe->u.qual.updated = IW_QUAL_DBM | IW_QUAL_ALL_UPDATED;
+      iwe->len = IW_EV_LEN(qual);
+      pointer += iwe->len;
+
+      iwe = (FAR struct iw_event *)pointer;
+      iwe->cmd = SIOCGIWFREQ;
+      iwe->u.freq.e = 0;
+      iwe->u.freq.m = record->channel;
+      iwe->len = IW_EV_LEN(freq);
+      pointer += iwe->len;
+
+      iwe = (FAR struct iw_event *)pointer;
+      iwe->cmd = SIOCGIWENCODE;
+      iwe->u.data.flags = record->authmode == ESP_HOSTED_WIFI_AUTH_OPEN ?
+                          IW_ENCODE_DISABLED :
+                          IW_ENCODE_ENABLED | IW_ENCODE_NOKEY;
+      iwe->u.data.length = 0;
+      iwe->u.data.pointer = NULL;
+      iwe->len = IW_EV_LEN(data);
+      pointer += iwe->len;
+    }
+
+  iwr->u.data.length = pointer - (FAR char *)iwr->u.data.pointer;
+  return OK;
+}
+
 static int esp_hosted_wlan_scan(FAR struct netdev_lowerhalf_s *dev,
                                 FAR struct iwreq *iwr, bool set)
 {
@@ -2165,11 +2731,49 @@ static int esp_hosted_wlan_scan(FAR struct netdev_lowerhalf_s *dev,
     (FAR struct esp_hosted_driver_s *)dev;
   int ret;
 
-  UNUSED(iwr);
-
   if (!set)
     {
-      return -EAGAIN;
+      if (iwr == NULL)
+        {
+          return -EINVAL;
+        }
+
+      if (priv->scan_in_progress || !priv->scan_done)
+        {
+          return -EAGAIN;
+        }
+
+      if (priv->scan_status != 0)
+        {
+          iwr->u.data.length = 0;
+          return -EIO;
+        }
+
+      if (!priv->scan_records_valid)
+        {
+          if (priv->scan_ap_available == 0)
+            {
+              priv->scan_records_valid = true;
+              priv->scan_result_count = 0;
+            }
+          else
+            {
+              priv->scan_request_count = priv->scan_ap_available;
+              ret = esp_hosted_send_rpc_request(priv,
+                ESP_HOSTED_RPC_WIFI_SCAN_GET_AP_RECORDS);
+              if (ret < 0)
+                {
+                  return ret;
+                }
+
+              if (!priv->scan_records_valid)
+                {
+                  return -EAGAIN;
+                }
+            }
+        }
+
+      return esp_hosted_wlan_format_scan_results(priv, iwr);
     }
 
   ret = esp_hosted_run_wlan_control_start(priv);
@@ -2178,9 +2782,19 @@ static int esp_hosted_wlan_scan(FAR struct netdev_lowerhalf_s *dev,
       return ret;
     }
 
+  priv->scan_in_progress = true;
+  priv->scan_done = false;
+  priv->scan_records_valid = false;
+  priv->scan_status = 0;
+  priv->scan_ap_available = 0;
+  priv->scan_result_count = 0;
+  priv->scan_request_count = 0;
+  memset(priv->scan_records, 0, sizeof(priv->scan_records));
+
   ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_WIFI_SCAN_START);
   if (ret < 0)
     {
+      priv->scan_in_progress = false;
       return ret;
     }
 

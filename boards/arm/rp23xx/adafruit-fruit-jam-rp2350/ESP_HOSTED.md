@@ -67,10 +67,12 @@ WAPI/wireless ioctl state for ESSID, passphrase, and WPA/cipher preferences is
 kept in driver RAM. A connect request sends `Req_WifiSetConfig` (`284`) with
 the configured station SSID/passphrase and then `Req_WifiConnect` (`282`).
 Disconnect sends `Req_WifiDisconnect` (`283`). Scan start sends
-`Req_WifiScanStart` (`286`), but AP result retrieval/formatting is not
-implemented yet, so `wapi scan wlan0` is still not complete. Carrier is turned
-on/off only from real `Event_StaConnected` (`775`) and
-`Event_StaDisconnected` (`776`) notifications from the coprocessor.
+`Req_WifiScanStart` (`286`). `Event_StaScanDone` (`774`) is decoded, and the
+first `SIOCGIWSCAN` after completion fetches up to 12 AP records with
+`Req_WifiScanGetApRecords` (`289`) and formats them as NuttX `iw_event`
+records for WAPI. Carrier is turned on/off only from real
+`Event_StaConnected` (`775`) and `Event_StaDisconnected` (`776`)
+notifications from the coprocessor.
 
 ## RP2350-Side Pins
 
@@ -173,8 +175,8 @@ Built locally on 2026-06-29:
 
 | Profile | Result | FLASH | RAM | Notes |
 | --- | --- | ---: | ---: | --- |
-| `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406584 B | 51060 B | Baseline image after returning from hosted config |
-| Experimental ESP-Hosted network profile | Pass | 456156 B | 65664 B | `CONFIG_ESP_HOSTED_WLAN=y`, WLAN lower-half plus initial Wi-Fi init/start/connect/scan RPCs compiled |
+| `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406576 B | 51060 B | Baseline image after returning from hosted config |
+| Experimental ESP-Hosted network profile | Pass | 457744 B | 66320 B | `CONFIG_ESP_HOSTED_WLAN=y`, WLAN lower-half plus Wi-Fi init/start/connect/scan/AP-record RPCs compiled |
 
 ## Validation Milestones
 
@@ -183,7 +185,7 @@ Built locally on 2026-06-29:
 | A | ESP32-C6 reset works from RP2350 | Partial | Scope trace or ESP firmware log after NuttX reset callback |
 | B | SPI exchanges valid ESP-Hosted control frames | In progress | Host receives valid ESP-Hosted INIT or RPC response |
 | C | NuttX gets coprocessor version/MAC | In progress | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
-| D | Scan returns AP records | In progress | `WifiScanStart` request is implemented; scan-done/AP-list parsing still needed |
+| D | Scan returns AP records | In progress | `WifiScanStart`, `Event_StaScanDone`, `WifiScanGetApRecords`, and WAPI result formatting are implemented; hardware validation still needed |
 | E | Connect and carrier event | In progress | `WifiSetConfig`/`WifiConnect` requests and STA connected/disconnected carrier handling are implemented |
 | F | `wlan0` appears | In progress | `ifconfig wlan0` shows a registered netdev after version/MAC RPCs |
 | G | DHCP through NuttX | Not started | NuttX DHCP client assigns `wlan0` IPv4 address |
@@ -235,8 +237,8 @@ wget http://<test-host>/
 
 1. Validate the initial `WifiInit`/`SetWifiMode`/`WifiStart` sequence against
    a Fruit Jam ESP32-C6 running ESP-Hosted-MCU firmware.
-2. Decode `Event_StaScanDone`, fetch AP records, and format scan results for
-   WAPI.
+2. Validate `wapi scan wlan0` against ESP-Hosted-MCU firmware, then expand AP
+   record fetching beyond the current conservative 12-record SPI-frame batch.
 3. Add RSSI/link-state/MAC query support where NuttX wireless tooling expects
    it.
 4. Verify that received `ESP_STA_IF` payloads are in the exact link-layer
