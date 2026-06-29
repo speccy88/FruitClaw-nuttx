@@ -421,6 +421,11 @@ static ssize_t cdcuart_sendbuf(FAR struct uart_dev_s *dev,
     {
       usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_SUBMITFAIL),
                (uint16_t)-ret);
+      flags = spin_lock_irqsave(&priv->lock);
+      sq_addlast((FAR sq_entry_t *)wrcontainer, &priv->txfree);
+      priv->nwrq++;
+      spin_unlock_irqrestore(&priv->lock, flags);
+      uart_datasent(dev);
       return ret;
     }
 
@@ -1226,6 +1231,14 @@ static void cdcacm_wrcomplete(FAR struct usbdev_ep_s *ep,
   sq_addlast((FAR sq_entry_t *)wrcontainer, &priv->txfree);
   priv->nwrq++;
   spin_unlock_irqrestore(&priv->lock, flags);
+
+  /* A writer may be blocked because no USB IN request was available when
+   * the serial TX buffer filled.  Wake it now so it can retry and drive the
+   * next packet submission, especially if cdcacm_sndpacket() is suppressed
+   * below by the polling reentrancy guard.
+   */
+
+  uart_datasent(&priv->serdev);
 
   /* Send the next packet unless this was some unusual termination
    * condition
@@ -3140,6 +3153,11 @@ static void cdcuart_dmasend(FAR struct uart_dev_s *dev)
     {
       usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_SUBMITFAIL),
                (uint16_t)-ret);
+      flags = spin_lock_irqsave(&priv->lock);
+      sq_addlast((FAR sq_entry_t *)wrcontainer, &priv->txfree);
+      priv->nwrq++;
+      spin_unlock_irqrestore(&priv->lock, flags);
+      uart_datasent(dev);
     }
 }
 #endif

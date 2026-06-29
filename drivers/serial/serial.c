@@ -78,6 +78,7 @@
 /* Timing */
 
 #define POLL_DELAY_USEC 1000
+#define XMIT_WAIT_TICKS TICK_PER_SEC
 
 /****************************************************************************
  * Private Types
@@ -317,8 +318,19 @@ static int uart_putxmitchar(FAR uart_dev_t *dev, int ch, bool oktoblock)
               uart_dmatxavail(dev);
 #endif
               uart_enabletxint(dev);
-              ret = nxsem_wait(&dev->xmitsem);
+              ret = nxsem_tickwait(&dev->xmitsem, XMIT_WAIT_TICKS);
               uart_disabletxint(dev);
+
+              /* CDC-style drivers can have room available after an IN
+               * request completes while this waiter misses the semaphore
+               * wake.  Periodically retry so console writes do not sleep
+               * forever with a full software TX buffer.
+               */
+
+              if (ret == -ETIMEDOUT)
+                {
+                  ret = OK;
+                }
             }
 
           leave_critical_section(flags);

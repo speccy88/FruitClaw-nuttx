@@ -161,6 +161,9 @@ struct esp_hosted_stats_s
   uint32_t malformed_frame_count;
   uint32_t checksum_error_count;
   uint32_t control_timeout_count;
+  uint32_t rpc_tlv_tx_count;
+  uint32_t rpc_tlv_rx_count;
+  uint32_t rpc_tlv_error_count;
   uint32_t rpc_request_count;
   uint32_t rpc_response_count;
   uint32_t rpc_event_count;

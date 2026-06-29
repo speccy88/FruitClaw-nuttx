@@ -77,8 +77,18 @@
 #define ESP_HOSTED_RPC_FIELD_MSG_ID      2
 #define ESP_HOSTED_RPC_FIELD_UID         3
 
+#define ESP_HOSTED_PSER_TLV_TYPE_EPNAME  1
+#define ESP_HOSTED_PSER_TLV_TYPE_DATA    2
+#define ESP_HOSTED_PSER_TLV_LEN_SIZE     2
+#define ESP_HOSTED_PSER_TLV_MAX_EP       16
+#define ESP_HOSTED_PSER_TLV_OVERHEAD     \
+  (1 + ESP_HOSTED_PSER_TLV_LEN_SIZE + ESP_HOSTED_PSER_TLV_MAX_EP + \
+   1 + ESP_HOSTED_PSER_TLV_LEN_SIZE)
+
 #define ESP_HOSTED_WIFI_IF_STA           0
 #define ESP_HOSTED_RPC_PAYLOAD_MAX       512
+#define ESP_HOSTED_RPC_TLV_PAYLOAD_MAX   \
+  (ESP_HOSTED_RPC_PAYLOAD_MAX + ESP_HOSTED_PSER_TLV_OVERHEAD)
 #define ESP_HOSTED_IDF_TARGET_MAX        16
 #define ESP_HOSTED_NETDEV_RX_QUOTA       4
 #define ESP_HOSTED_NETDEV_TX_QUOTA       2
@@ -173,6 +183,7 @@ struct esp_hosted_driver_s
   bool have_mac;
   bool have_fwversion;
 #ifdef CONFIG_ESP_HOSTED_WLAN
+  bool mac_probe_sent;
   bool wlan_registered;
   bool ifup;
   bool carrier_on;
@@ -198,6 +209,7 @@ struct esp_hosted_driver_s
   uint16_t seq_num;
   uint8_t mac[ESP_HOSTED_MAC_SIZE];
   uint8_t rpc_payload[ESP_HOSTED_RPC_PAYLOAD_MAX];
+  uint8_t rpc_tlv_payload[ESP_HOSTED_RPC_TLV_PAYLOAD_MAX];
 #ifdef CONFIG_ESP_HOSTED_WLAN
   uint8_t netdev_tx_payload[ESP_HOSTED_MAX_PAYLOAD];
 #endif
@@ -474,6 +486,142 @@ static int esp_hosted_pb_get_bytes(FAR const uint8_t *buf, size_t len,
 static int32_t esp_hosted_pb_int32(uint64_t value)
 {
   return (int32_t)(uint32_t)value;
+}
+
+static void esp_hosted_put_le16(FAR uint8_t *buf, uint16_t value)
+{
+  buf[0] = value & 0xff;
+  buf[1] = value >> 8;
+}
+
+static uint16_t esp_hosted_get_le16(FAR const uint8_t *buf)
+{
+  return (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+}
+
+static int esp_hosted_pserial_wrap(FAR struct esp_hosted_driver_s *priv,
+                                   FAR const char *epname,
+                                   FAR const uint8_t *payload,
+                                   size_t payload_len,
+                                   FAR uint8_t *out,
+                                   size_t out_size,
+                                   FAR size_t *out_len)
+{
+  size_t ep_len;
+  size_t total_len;
+  size_t offset = 0;
+
+  ep_len = strlen(epname);
+  if (ep_len == 0 || ep_len > UINT16_MAX ||
+      ep_len > ESP_HOSTED_PSER_TLV_MAX_EP || payload_len > UINT16_MAX)
+    {
+      priv->stats.rpc_tlv_error_count++;
+      return -EINVAL;
+    }
+
+  total_len = 1 + ESP_HOSTED_PSER_TLV_LEN_SIZE + ep_len +
+              1 + ESP_HOSTED_PSER_TLV_LEN_SIZE + payload_len;
+  if (total_len > out_size)
+    {
+      priv->stats.rpc_tlv_error_count++;
+      return -ENOSPC;
+    }
+
+  out[offset++] = ESP_HOSTED_PSER_TLV_TYPE_EPNAME;
+  esp_hosted_put_le16(&out[offset], ep_len);
+  offset += ESP_HOSTED_PSER_TLV_LEN_SIZE;
+  memcpy(&out[offset], epname, ep_len);
+  offset += ep_len;
+
+  out[offset++] = ESP_HOSTED_PSER_TLV_TYPE_DATA;
+  esp_hosted_put_le16(&out[offset], payload_len);
+  offset += ESP_HOSTED_PSER_TLV_LEN_SIZE;
+  memcpy(&out[offset], payload, payload_len);
+  offset += payload_len;
+
+  *out_len = offset;
+  priv->stats.rpc_tlv_tx_count++;
+  return OK;
+}
+
+static int esp_hosted_pserial_unwrap(FAR struct esp_hosted_driver_s *priv,
+                                     FAR const uint8_t *payload,
+                                     size_t payload_len,
+                                     FAR const uint8_t **rpc_payload,
+                                     FAR size_t *rpc_len)
+{
+  FAR const uint8_t *data = NULL;
+  char epname[ESP_HOSTED_PSER_TLV_MAX_EP + 1];
+  size_t data_len = 0;
+  size_t offset = 0;
+  bool have_epname = false;
+  bool have_data = false;
+
+  memset(epname, 0, sizeof(epname));
+
+  while (offset < payload_len)
+    {
+      uint8_t type;
+      uint16_t len;
+
+      if (payload_len - offset < 1 + ESP_HOSTED_PSER_TLV_LEN_SIZE)
+        {
+          priv->stats.rpc_tlv_error_count++;
+          return -EINVAL;
+        }
+
+      type = payload[offset++];
+      len = esp_hosted_get_le16(&payload[offset]);
+      offset += ESP_HOSTED_PSER_TLV_LEN_SIZE;
+
+      if (len > payload_len - offset)
+        {
+          priv->stats.rpc_tlv_error_count++;
+          return -EINVAL;
+        }
+
+      switch (type)
+        {
+          case ESP_HOSTED_PSER_TLV_TYPE_EPNAME:
+            if (len == 0 || len > ESP_HOSTED_PSER_TLV_MAX_EP)
+              {
+                priv->stats.rpc_tlv_error_count++;
+                return -EINVAL;
+              }
+
+            memcpy(epname, &payload[offset], len);
+            epname[len] = '\0';
+            have_epname = true;
+            break;
+
+          case ESP_HOSTED_PSER_TLV_TYPE_DATA:
+            data = &payload[offset];
+            data_len = len;
+            have_data = true;
+            break;
+
+          default:
+            priv->stats.rpc_tlv_error_count++;
+            return -EINVAL;
+        }
+
+      offset += len;
+    }
+
+  if (!have_epname || !have_data || data_len == 0 ||
+      (strcmp(epname, ESP_HOSTED_RPC_EP_NAME_RSP) != 0 &&
+       strcmp(epname, ESP_HOSTED_RPC_EP_NAME_EVT) != 0))
+    {
+      priv->stats.rpc_tlv_error_count++;
+      nwarn("ESP-Hosted invalid pserial TLV: ep=%s have_data=%d len=%zu\n",
+            have_epname ? epname : "<none>", have_data, data_len);
+      return -EINVAL;
+    }
+
+  *rpc_payload = data;
+  *rpc_len = data_len;
+  priv->stats.rpc_tlv_rx_count++;
+  return OK;
 }
 
 static uint32_t esp_hosted_next_rpc_uid(FAR struct esp_hosted_driver_s *priv)
@@ -1050,7 +1198,25 @@ static int esp_hosted_parse_mac_response(FAR struct esp_hosted_driver_s *priv,
 
   if (!have_mac)
     {
+      if (resp != 0)
+        {
+          nwarn("ESP-Hosted MAC response failed: resp=%" PRId32 "\n", resp);
+#ifdef CONFIG_ESP_HOSTED_WLAN
+          priv->mac_probe_sent = false;
+#endif
+          return -EIO;
+        }
+
       return -EINVAL;
+    }
+
+  if (resp != 0)
+    {
+      nwarn("ESP-Hosted MAC response failed: resp=%" PRId32 "\n", resp);
+#ifdef CONFIG_ESP_HOSTED_WLAN
+      priv->mac_probe_sent = false;
+#endif
+      return -EIO;
     }
 
   memcpy(priv->mac, mac, sizeof(priv->mac));
@@ -1062,6 +1228,7 @@ static int esp_hosted_parse_mac_response(FAR struct esp_hosted_driver_s *priv,
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], resp);
 
 #ifdef CONFIG_ESP_HOSTED_WLAN
+  priv->mac_probe_sent = true;
   esp_hosted_try_register_wlan(priv);
 #endif
 
@@ -1225,6 +1392,11 @@ static int esp_hosted_parse_fwversion_response(
         version.chip_id, version.resp);
 
 #ifdef CONFIG_ESP_HOSTED_WLAN
+  if (!priv->wlan_control_started)
+    {
+      priv->wlan_control_start_pending = true;
+    }
+
   esp_hosted_try_register_wlan(priv);
 #endif
 
@@ -1707,6 +1879,7 @@ static int esp_hosted_parse_sta_connected_event(
       priv->carrier_on = true;
       priv->stats.wlan_link_up_count++;
       netdev_lower_carrier_on(&priv->lower);
+      netdev_lower_rxready(&priv->lower);
     }
 
   ninfo("ESP-Hosted STA connected event: resp=%" PRId32 "\n", resp);
@@ -1742,10 +1915,20 @@ static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
                                           FAR const uint8_t *payload,
                                           uint16_t len)
 {
+  FAR const uint8_t *rpc_payload;
+  size_t rpc_len;
   struct esp_hosted_rpc_message_s msg;
   int ret;
 
-  ret = esp_hosted_parse_rpc_message(payload, len, &msg);
+  ret = esp_hosted_pserial_unwrap(priv, payload, len, &rpc_payload,
+                                  &rpc_len);
+  if (ret < 0)
+    {
+      priv->stats.rpc_malformed_count++;
+      return ret;
+    }
+
+  ret = esp_hosted_parse_rpc_message(rpc_payload, rpc_len, &msg);
   if (ret < 0)
     {
       priv->stats.rpc_malformed_count++;
@@ -2296,6 +2479,11 @@ static int esp_hosted_wlan_ifup(FAR struct netdev_lowerhalf_s *dev)
     {
       netdev_lower_carrier_off(&priv->lower);
     }
+  else
+    {
+      netdev_lower_carrier_on(&priv->lower);
+      netdev_lower_rxready(&priv->lower);
+    }
 
   return OK;
 }
@@ -2842,8 +3030,20 @@ static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
       return ret;
     }
 
+  ret = esp_hosted_pserial_wrap(priv, ESP_HOSTED_RPC_EP_NAME_RSP,
+                                priv->rpc_payload, payload_len,
+                                priv->rpc_tlv_payload,
+                                sizeof(priv->rpc_tlv_payload),
+                                &payload_len);
+  if (ret < 0)
+    {
+      priv->stats.rpc_malformed_count++;
+      nxmutex_unlock(&priv->lock);
+      return ret;
+    }
+
   esp_hosted_build_header(priv, priv->tx_frame, ESP_HOSTED_SERIAL_IF, 0, 0,
-                          priv->rpc_payload, payload_len);
+                          priv->rpc_tlv_payload, payload_len);
   memset(priv->rx_frame, 0, sizeof(priv->rx_frame));
 
   ret = esp_hosted_spi_exchange_frame(priv, priv->tx_frame, priv->rx_frame);
@@ -2876,7 +3076,7 @@ static int esp_hosted_run_wlan_control_start(
       return OK;
     }
 
-  if (!priv->have_mac || !priv->have_fwversion)
+  if (!priv->have_fwversion)
     {
       return -EAGAIN;
     }
@@ -2929,12 +3129,6 @@ static void esp_hosted_run_startup_probe(FAR struct esp_hosted_driver_s *priv)
   if (ret < 0)
     {
       nwarn("ESP-Hosted firmware-version RPC failed: %d\n", ret);
-    }
-
-  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_GET_MAC_ADDRESS);
-  if (ret < 0)
-    {
-      nwarn("ESP-Hosted MAC RPC failed: %d\n", ret);
     }
 }
 
@@ -3006,6 +3200,20 @@ static void esp_hosted_rx_work(FAR void *arg)
       if (ret < 0 && ret != -EAGAIN)
         {
           nwarn("ESP-Hosted STA control start failed: %d\n", ret);
+        }
+    }
+
+  esp_hosted_drain_rx(priv);
+
+  if (priv->wlan_control_started && !priv->have_mac &&
+      !priv->mac_probe_sent)
+    {
+      priv->mac_probe_sent = true;
+      ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_GET_MAC_ADDRESS);
+      if (ret < 0)
+        {
+          priv->mac_probe_sent = false;
+          nwarn("ESP-Hosted MAC RPC failed: %d\n", ret);
         }
     }
 
