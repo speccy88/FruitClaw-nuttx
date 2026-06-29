@@ -174,6 +174,25 @@ void board_late_initialize(void);
 #endif
 
 /****************************************************************************
+ * Name: board_cdcacm_connected
+ *
+ * Description:
+ *   Notify board logic when a CDC/ACM function is configured or
+ *   unconfigured by the USB host.  Boards may override this weak hook for
+ *   bring-up diagnostics or policy that depends on USB console availability.
+ *
+ * Input Parameters:
+ *   minor     - CDC/ACM minor number, e.g. 0 for /dev/ttyACM0.
+ *   connected - True when the host configured the function, false when it is
+ *               no longer configured.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_CDCACM
+void board_cdcacm_connected(int minor, bool connected);
+#endif
+
+/****************************************************************************
  * Name: board_app_finalinitialize
  *
  * Description:

@@ -23,6 +23,70 @@ config RP23XX_SYSTIMER_SYSTICK
 	---help---
 		Use ARM SysTick.
 
+config RP23XX_PSRAM
+	bool "External PSRAM"
+	default n
+	---help---
+		Enable the RP2350 QMI CS1 external PSRAM interface.
+
+if RP23XX_PSRAM
+
+choice
+	prompt "PSRAM heap mode"
+	default RP23XX_PSRAM_HEAP_USER if MM_KERNEL_HEAP
+	default RP23XX_PSRAM_HEAP_SINGLE
+
+config RP23XX_PSRAM_HEAP_SINGLE
+	bool "Add PSRAM to the main heap"
+	depends on MM_REGIONS > 1
+	depends on !MM_KERNEL_HEAP
+	---help---
+		Add PSRAM as an extra region in the default user heap.
+
+config RP23XX_PSRAM_HEAP_USER
+	bool "Use PSRAM as the user heap"
+	depends on MM_KERNEL_HEAP
+	---help---
+		Use internal SRAM for the kernel heap and PSRAM for the default
+		user heap.
+
+config RP23XX_PSRAM_HEAP_SEPARATE
+	bool "Create a separate PSRAM heap"
+	select ARCH_HAVE_EXTRA_HEAPS
+	---help---
+		Create a separately named heap backed by PSRAM.
+
+endchoice
+
+config RP23XX_PSRAM_SIZE
+	int "PSRAM size in bytes"
+	default 8388608
+	---help---
+		Size of the external PSRAM aperture made available to NuttX.
+
+config RP23XX_PSRAM_MAX_SCK_HZ
+	int "Maximum PSRAM SCK frequency"
+	default 63000000
+	---help---
+		Maximum QMI SCK frequency used for PSRAM transfers.
+
+config RP23XX_PSRAM_WAIT_TIMEOUT
+	int "PSRAM QMI wait timeout"
+	default 1000000
+	---help---
+		Maximum poll iterations for QMI direct-mode wait loops during
+		PSRAM setup.
+
+config RP23XX_PSRAM_FALLBACK_KERNEL_HEAPSIZE
+	int "Fallback internal kernel heap size"
+	default 262144
+	depends on RP23XX_PSRAM_HEAP_USER
+	---help---
+		Internal SRAM reserved for the kernel heap if PSRAM detection
+		fails and the board must fall back to an internal user heap.
+
+endif # RP23XX_PSRAM
+
 #####################################################################
 #  UART Configuration
 #####################################################################
@@ -709,6 +773,21 @@ config RP23XX_I2S_PIO_SM
 	range 0 3
 
 endif # RP23XX_I2S
+
+#####################################################################
+#  HSTX DVI Configuration
+#####################################################################
+
+config RP23XX_HSTX_DVI
+	bool "HSTX DVI framebuffer"
+	depends on RP23XX_RP2350B
+	select DRIVERS_VIDEO
+	select VIDEO_FB
+	select RP23XX_DMAC
+	---help---
+		Enable a 640x480@60Hz DVI signal using the RP2350 HSTX block.
+		The exported /dev/fb0 framebuffer is 128x128 RGB565 and is
+		scaled 3x into the active DVI area.
 
 #####################################################################
 #  SPISD Configuration

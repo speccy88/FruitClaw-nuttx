@@ -33,6 +33,8 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
+#define RP23XX_QMI_BASE                 RP23XX_XIP_QMI_BASE
+
 /* Register offsets *********************************************************/
 
 #define RP23XX_QMI_DIRECT_CSR_OFFSET    0x00000000
@@ -93,39 +95,51 @@
 #define RP23XX_QMI_DIRECT_TX_DWIDTH             (1 << 18) /* Data width. If 0, hardware will transmit the 8 LSBs of the DIRECT_TX DATA field, and return an 8-bit value in the 8 LSBs of DIRECT_RX. If 1, the full 16-bit width is used. 8-bit and 16-bit transfers can be mixed freely */
 #define RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT       (16)      /* Configure whether this FIFO record is transferred with single/dual/quad interface width (0/1/2). Different widths can be mixed freely */
 #define RP23XX_QMI_DIRECT_TX_IWIDTH_MASK        (0x3 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
+#define RP23XX_QMI_DIRECT_TX_IWIDTH_SINGLE      (0x0 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
+#define RP23XX_QMI_DIRECT_TX_IWIDTH_DUAL        (0x1 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
+#define RP23XX_QMI_DIRECT_TX_IWIDTH_QUAD        (0x2 << RP23XX_QMI_DIRECT_TX_IWIDTH_SHIFT)
 #define RP23XX_QMI_DIRECT_TX_DATA_MASK          (0xffff)  /* Data pushed here will be clocked out falling edges of SCK (or before the very first rising edge of SCK, if this is the first pulse). For each byte clocked out, the interface will simultaneously sample one byte, on rising edges of SCK, and push this to the DIRECT_RX FIFO. For 16-bit data, the least-significant byte is transmitted first. */
 #define RP23XX_QMI_DIRECT_RX_MASK               (0xffff)  /* With each byte clocked out on the serial interface, one byte will simultaneously be clocked in, and will appear in this FIFO. The serial interface will stall when this FIFO is full, to avoid dropping data. When 16-bit data is pushed into the TX FIFO, the corresponding RX FIFO push will also contain 16 bits of data. The least-significant byte is the first one received. */
 
 #define RP23XX_QMI_TIMING_COOLDOWN_SHIFT        (30)         /* Chip select cooldown period. When a memory transfer finishes, the chip select remains asserted for 64 x COOLDOWN system clock cycles, plus half an SCK clock period (rounded up for odd SCK divisors). After this cooldown expires, the chip select is always deasserted to save power */
-#define RP23XX_QMI_TIMING_COOLDOWN_MASK         (0x3 << RP23XX_QMI_M0_TIMING_COOLDOWN_SHIFT)
+#define RP23XX_QMI_TIMING_COOLDOWN_MASK         (0x3 << RP23XX_QMI_TIMING_COOLDOWN_SHIFT)
 #define RP23XX_QMI_TIMING_PAGEBREAK_SHIFT       (28)         /* When page break is enabled, chip select will automatically deassert when crossing certain power-of-2-aligned address boundaries. The next access will always begin a new read/write SPI burst, even if the address of the next access follows in sequence with the last access before the page boundary */
-#define RP23XX_QMI_TIMING_PAGEBREAK_MASK        (0x3 << RP23XX_QMI_M0_TIMING_PAGEBREAK_SHIFT)
+#define RP23XX_QMI_TIMING_PAGEBREAK_MASK        (0x3 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
+#define RP23XX_QMI_TIMING_PAGEBREAK_NONE        (0x0 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
+#define RP23XX_QMI_TIMING_PAGEBREAK_256         (0x1 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
+#define RP23XX_QMI_TIMING_PAGEBREAK_1024        (0x2 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
+#define RP23XX_QMI_TIMING_PAGEBREAK_4096        (0x3 << RP23XX_QMI_TIMING_PAGEBREAK_SHIFT)
 #define RP23XX_QMI_TIMING_SELECT_SETUP          (1 << 25)    /* Add up to one additional system clock cycle of setup between chip select assertion and the first rising edge of SCK */
 #define RP23XX_QMI_TIMING_SELECT_HOLD_SHIFT     (23)         /* Add up to three additional system clock cycles of active hold between the last falling edge of SCK and the deassertion of this window’s chip select */
-#define RP23XX_QMI_TIMING_SELECT_HOLD_MASK      (0x3 << RP23XX_QMI_M0_TIMING_SELECT_HOLD_SHIFT)
+#define RP23XX_QMI_TIMING_SELECT_HOLD_MASK      (0x3 << RP23XX_QMI_TIMING_SELECT_HOLD_SHIFT)
 #define RP23XX_QMI_TIMING_MAX_SELECT_SHIFT      (17)         /* Enforce a maximum assertion duration for this window’s chip select, in units of 64 system clock cycles. If 0, the QMI is permitted to keep the chip select asserted indefinitely when servicing sequential memory accesses (see COOLDOWN) */
-#define RP23XX_QMI_TIMING_MAX_SELECT_MASK       (0x3f << RP23XX_QMI_M0_TIMING_MAX_SELECT_SHIFT)
+#define RP23XX_QMI_TIMING_MAX_SELECT_MASK       (0x3f << RP23XX_QMI_TIMING_MAX_SELECT_SHIFT)
 #define RP23XX_QMI_TIMING_MIN_DESELECT_SHIFT    (12)         /* After this window’s chip select is deasserted, it remains deasserted for half an SCK cycle (rounded up to an integer number of system clock cycles), plus MIN_DESELECT additional system clock cycles, before the QMI reasserts either chip select pin */
-#define RP23XX_QMI_TIMING_MIN_DESELECT_MASK     (0x1f << RP23XX_QMI_M0_TIMING_MIN_DESELECT_SHIFT)
+#define RP23XX_QMI_TIMING_MIN_DESELECT_MASK     (0x1f << RP23XX_QMI_TIMING_MIN_DESELECT_SHIFT)
 #define RP23XX_QMI_TIMING_RXDELAY_SHIFT         (8)          /* Delay the read data sample timing, in units of one half of a system clock cycle. (Not necessarily half of an SCK cycle.) An RXDELAY of 0 means the sample is captured at the SDI input registers simultaneously with the rising edge of SCK launched from the SCK output register */
-#define RP23XX_QMI_TIMING_RXDELAY_MASK          (0x7 << RP23XX_QMI_M0_TIMING_RXDELAY_SHIFT)
+#define RP23XX_QMI_TIMING_RXDELAY_MASK          (0x7 << RP23XX_QMI_TIMING_RXDELAY_SHIFT)
 #define RP23XX_QMI_TIMING_CLKDIV_MASK           (0x000000ff) /* Clock divisor. Odd and even divisors are supported. Defines the SCK clock period in units of 1 system clock cycle. Divisors 1..255 are encoded directly, and a divisor of 256 is encoded with a value of CLKDIV=0 */
 
 #define RP23XX_QMI_FMT_DTR                      (1 << 28)    /* Enable double transfer rate (DTR) for read commands: address, suffix and read data phases are active on both edges of SCK. SDO data is launched centre-aligned on each SCK edge, and SDI data is captured on the SCK edge that follows its launch */
 #define RP23XX_QMI_FMT_DUMMY_LEN_SHIFT          (16)         /* Length of dummy phase between command suffix and data phase, in units of 4 bits. (i.e. 1 cycle for quad width, 2 for dual, 4 for single) */
-#define RP23XX_QMI_FMT_DUMMY_LEN_MASK           (0x7 << RP23XX_QMI_M0_RFMT_DUMMY_LEN_SHIFT)
+#define RP23XX_QMI_FMT_DUMMY_LEN_MASK           (0x7 << RP23XX_QMI_FMT_DUMMY_LEN_SHIFT)
 #define RP23XX_QMI_FMT_SUFFIX_LEN_SHIFT         (14)         /* Length of post-address command suffix, in units of 4 bits. (i.e. 1 cycle for quad width, 2 for dual, 4 for single) */
-#define RP23XX_QMI_FMT_SUFFIX_LEN_MASK          (0x3 << RP23XX_QMI_M0_RFMT_SUFFIX_LEN_SHIFT)
-#define RP23XX_QMI_FMT_PREFIX_LEN               (1 << 12)    /* Length of command prefix, in units of 8 bits. (i.e. 2 cycles for quad width, 4 for dual, 8 for single) */
+#define RP23XX_QMI_FMT_SUFFIX_LEN_MASK          (0x3 << RP23XX_QMI_FMT_SUFFIX_LEN_SHIFT)
+#define RP23XX_QMI_FMT_PREFIX_LEN_SHIFT         (12)         /* Length of command prefix, in units of 8 bits. (i.e. 2 cycles for quad width, 4 for dual, 8 for single) */
+#define RP23XX_QMI_FMT_PREFIX_LEN               (1 << RP23XX_QMI_FMT_PREFIX_LEN_SHIFT)
 #define RP23XX_QMI_FMT_DATA_WIDTH_SHIFT         (8)          /* The width used for the data transfer */
-#define RP23XX_QMI_FMT_DATA_WIDTH_MASK          (0x3 << RP23XX_QMI_M0_RFMT_DATA_WIDTH_SHIFT)
+#define RP23XX_QMI_FMT_DATA_WIDTH_MASK          (0x3 << RP23XX_QMI_FMT_DATA_WIDTH_SHIFT)
 #define RP23XX_QMI_FMT_DUMMY_WIDTH_SHIFT        (6)          /* The width used for the dummy phase, if any */
-#define RP23XX_QMI_FMT_DUMMY_WIDTH_MASK         (0x3 << RP23XX_QMI_M0_RFMT_DUMMY_WIDTH_SHIFT)
+#define RP23XX_QMI_FMT_DUMMY_WIDTH_MASK         (0x3 << RP23XX_QMI_FMT_DUMMY_WIDTH_SHIFT)
 #define RP23XX_QMI_FMT_SUFFIX_WIDTH_SHIFT       (4)          /* The width used for the post-address command suffix, if any */
-#define RP23XX_QMI_FMT_SUFFIX_WIDTH_MASK        (0x4 << RP23XX_QMI_M0_RFMT_SUFFIX_WIDTH_SHIFT)
+#define RP23XX_QMI_FMT_SUFFIX_WIDTH_MASK        (0x3 << RP23XX_QMI_FMT_SUFFIX_WIDTH_SHIFT)
 #define RP23XX_QMI_FMT_ADDR_WIDTH_SHIFT         (2)          /* The transfer width used for the address. The address phase always transfers 24 bits in total */
-#define RP23XX_QMI_FMT_ADDR_WIDTH_MASK          (0x3 << RP23XX_QMI_M0_RFMT_ADDR_WIDTH_SHIFT)
-#define RP23XX_QMI_FMT_PREFIX_WIDTH_MASK        (0x00000003) /* The transfer width used for the command prefix, if any */
+#define RP23XX_QMI_FMT_ADDR_WIDTH_MASK          (0x3 << RP23XX_QMI_FMT_ADDR_WIDTH_SHIFT)
+#define RP23XX_QMI_FMT_PREFIX_WIDTH_SHIFT       (0)          /* The transfer width used for the command prefix, if any */
+#define RP23XX_QMI_FMT_PREFIX_WIDTH_MASK        (0x3 << RP23XX_QMI_FMT_PREFIX_WIDTH_SHIFT)
+#define RP23XX_QMI_FMT_WIDTH_SINGLE             (0x0)
+#define RP23XX_QMI_FMT_WIDTH_DUAL               (0x1)
+#define RP23XX_QMI_FMT_WIDTH_QUAD               (0x2)
 
 #define RP23XX_QMI_CMD_SUFFIX_SHIFT             (8)          /* The command suffix bits following the address, if Mx_RFMT_SUFFIX_LEN is nonzero */
 #define RP23XX_QMI_CMD_SUFFIX_MASK              (0xff << RP23XX_QMI_CMD_SUFFIX_SHIFT)

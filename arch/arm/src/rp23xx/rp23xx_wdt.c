@@ -44,17 +44,20 @@
 #include <nuttx/arch.h>
 #include <nuttx/clock.h>
 #include <nuttx/timers/watchdog.h>
+#include <arch/board/board.h>
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 
-#define WD_ENABLE_BITS   (RP23XX_WATCHDOG_CTRL_ENABLE     \
+#define WD_ENABLE_BITS   RP23XX_WATCHDOG_CTRL_ENABLE
+#define WD_CTRL_MASK     (RP23XX_WATCHDOG_CTRL_ENABLE     \
                         | RP23XX_WATCHDOG_CTRL_PAUSE_DBG0 \
                         | RP23XX_WATCHDOG_CTRL_PAUSE_DBG1 \
                         | RP23XX_WATCHDOG_CTRL_PAUSE_JTAG)
 
 #define WDT_MAX_TIMEOUT (0xffffff)  /* 16777215 ~ 16 sec */
+#define WDT_TICK_CYCLES (BOARD_REF_FREQ / 1000000)
 
 /****************************************************************************
  * Private Types
@@ -92,6 +95,8 @@ static int  rp23xx_wdt_ioctl      (struct watchdog_lowerhalf_s *lower,
                                int                          cmd,
                                unsigned long                arg);
 
+static void rp23xx_wdt_start_tick(void);
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -118,6 +123,12 @@ static watchdog_lowerhalf_t g_rp23xx_watchdog_lowerhalf =
  * Private Functions
  ****************************************************************************/
 
+static void rp23xx_wdt_start_tick(void)
+{
+  putreg32(WDT_TICK_CYCLES, RP23XX_TICKS_WATCHDOG_CYCLES);
+  putreg32(RP23XX_TICKS_WATCHDOG_CTRL_EN, RP23XX_TICKS_WATCHDOG_CTRL);
+}
+
 /****************************************************************************
  * Name: rp23xx_wdt_start
  ****************************************************************************/
@@ -137,10 +148,11 @@ int rp23xx_wdt_start(struct watchdog_lowerhalf_s *lower)
 
   putreg32(priv->timeout * USEC_PER_MSEC,  RP23XX_WATCHDOG_LOAD);
 
+  rp23xx_wdt_start_tick();
   putreg32(RP23XX_PSM_WDSEL_BITS & ~(RP23XX_PSM_XOSC | RP23XX_PSM_ROSC),
            RP23XX_PSM_WDSEL);
 
-  modreg32(WD_ENABLE_BITS, WD_ENABLE_BITS, RP23XX_WATCHDOG_CTRL);
+  modreg32(WD_ENABLE_BITS, WD_CTRL_MASK, RP23XX_WATCHDOG_CTRL);
 
   priv->started = true;
   return OK;
@@ -271,10 +283,21 @@ int rp23xx_wdt_init(void)
 {
   watchdog_lowerhalf_t *lower = &g_rp23xx_watchdog_lowerhalf;
   int                   ret   = OK;
+  uint32_t              ctrl = getreg32(RP23XX_WATCHDOG_CTRL);
 
-  putreg32(WDT_MAX_TIMEOUT,  RP23XX_WATCHDOG_LOAD);
-  modreg32(0, RP23XX_WATCHDOG_CTRL_ENABLE, RP23XX_WATCHDOG_CTRL);
-  lower->timeout = WDT_MAX_TIMEOUT / USEC_PER_MSEC;
+  if ((ctrl & RP23XX_WATCHDOG_CTRL_ENABLE) != 0)
+    {
+      rp23xx_wdt_start_tick();
+      lower->timeout = (ctrl & RP23XX_WATCHDOG_CTRL_TIME_MASK) /
+                       USEC_PER_MSEC;
+      lower->started = true;
+    }
+  else
+    {
+      putreg32(WDT_MAX_TIMEOUT, RP23XX_WATCHDOG_LOAD);
+      lower->timeout = WDT_MAX_TIMEOUT / USEC_PER_MSEC;
+      lower->started = false;
+    }
 
   lower->upper = watchdog_register(CONFIG_WATCHDOG_DEVPATH,
                                    (struct watchdog_lowerhalf_s *) lower);

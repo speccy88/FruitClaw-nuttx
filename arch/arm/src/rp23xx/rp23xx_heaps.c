@@ -29,7 +29,10 @@
 #include <nuttx/kmalloc.h>
 #include <nuttx/mm/mm.h>
 
+#include <stdint.h>
+
 #include "arm_internal.h"
+#include "rp23xx_psram.h"
 
 #if defined(CONFIG_RP23XX_PSRAM)
 
@@ -37,8 +40,63 @@
  * Private Data
  ****************************************************************************/
 
-static void * const psram_start = (void *)0x11000000ul;
-static const size_t psram_size = 8 * 1024 * 1024;
+static void * const psram_start = (void *)RP23XX_PSRAM_NOCACHE_BASE;
+
+#if defined (CONFIG_RP23XX_PSRAM_HEAP_USER)
+static bool g_psram_user_heap;
+#endif
+
+/****************************************************************************
+ * Private Functions
+ ****************************************************************************/
+
+#if defined (CONFIG_RP23XX_PSRAM_HEAP_USER)
+static uintptr_t rp23xx_internal_heap_end(void)
+{
+#ifdef CONFIG_ARCH_PGPOOL_PBASE
+  return CONFIG_ARCH_PGPOOL_PBASE;
+#else
+  return CONFIG_RAM_END;
+#endif
+}
+
+static uintptr_t rp23xx_heap_align_up(uintptr_t value)
+{
+  return (value + 7) & ~(uintptr_t)7;
+}
+
+static uintptr_t rp23xx_heap_align_down(uintptr_t value)
+{
+  return value & ~(uintptr_t)7;
+}
+
+static size_t rp23xx_fallback_kheap_size(void)
+{
+  uintptr_t start = rp23xx_heap_align_up(g_idle_topstack);
+  uintptr_t end = rp23xx_heap_align_down(rp23xx_internal_heap_end());
+  size_t available = end - start;
+  size_t requested = CONFIG_RP23XX_PSRAM_FALLBACK_KERNEL_HEAPSIZE;
+
+  if (requested >= available)
+    {
+      requested = available / 2;
+    }
+
+  return requested & ~(size_t)7;
+}
+
+static void rp23xx_allocate_internal_fallback_heap(void **heap_start,
+                                                   size_t *heap_size)
+{
+  uintptr_t start = rp23xx_heap_align_up(g_idle_topstack);
+  uintptr_t end = rp23xx_heap_align_down(rp23xx_internal_heap_end());
+  size_t kheap_size = rp23xx_fallback_kheap_size();
+  uintptr_t user_start = start + kheap_size;
+
+  *heap_start = (void *)user_start;
+  *heap_size = end - user_start;
+}
+#endif
 
 /****************************************************************************
  * Public Functions
@@ -56,9 +114,11 @@ static struct mm_heap_s *g_psramheap;
 #if CONFIG_MM_REGIONS > 1
 void arm_addregion(void)
 {
+  size_t size = rp23xx_psramconfig();
+
   /* Add the PSRAM region to main heap */
 
-  kumm_addregion(psram_start, psram_size);
+  kumm_addregion(psram_start, size);
 }
 #endif
 
@@ -72,21 +132,35 @@ void arm_addregion(void)
 
 void up_allocate_kheap(void **heap_start, size_t *heap_size)
 {
-  *heap_start = (void *)g_idle_topstack;
+  *heap_start = (void *)rp23xx_heap_align_up(g_idle_topstack);
 
-#ifdef CONFIG_ARCH_PGPOOL_PBASE
-  *heap_size  = CONFIG_ARCH_PGPOOL_PBASE - g_idle_topstack;
-#else
-  *heap_size  = CONFIG_RAM_END - g_idle_topstack;
-#endif
+  if (!g_psram_user_heap)
+    {
+      *heap_size = rp23xx_fallback_kheap_size();
+    }
+  else
+    {
+      *heap_size = rp23xx_internal_heap_end() - (uintptr_t)*heap_start;
+    }
 }
 
 /* Use the external PSRAM as the default user heap */
 
 void up_allocate_heap(void **heap_start, size_t *heap_size)
 {
-  *heap_start = psram_start;
-  *heap_size = psram_size;
+  size_t size = rp23xx_psramconfig();
+
+  if (size > 0)
+    {
+      g_psram_user_heap = true;
+      *heap_start = psram_start;
+      *heap_size = size;
+    }
+  else
+    {
+      g_psram_user_heap = false;
+      rp23xx_allocate_internal_fallback_heap(heap_start, heap_size);
+    }
 }
 
 #elif defined (CONFIG_RP23XX_PSRAM_HEAP_SEPARATE)
@@ -97,7 +171,9 @@ void up_allocate_heap(void **heap_start, size_t *heap_size)
 
 void up_extraheaps_init(void)
 {
-    g_psramheap = mm_initialize("psram", psram_start, psram_size);
+  size_t size = rp23xx_psramconfig();
+
+  g_psramheap = mm_initialize("psram", psram_start, size);
 }
 #endif
 

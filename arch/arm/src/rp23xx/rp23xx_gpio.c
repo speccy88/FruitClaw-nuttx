@@ -373,7 +373,7 @@ int rp23xx_gpio_irq_attach(uint32_t gpio, uint32_t intrmode,
     }
 
   DEBUGASSERT(gpio < RP23XX_GPIO_NUM);
-  DEBUGASSERT(intrmode <= RP23XX_GPIO_INTR_EDGE_HIGH);
+  DEBUGASSERT(intrmode <= RP23XX_GPIO_INTR_EDGE_BOTH);
 
   /* Save handler information */
 
@@ -398,6 +398,7 @@ int rp23xx_gpio_irq_attach(uint32_t gpio, uint32_t intrmode,
 
 void rp23xx_gpio_enable_irq(uint32_t gpio)
 {
+  uint32_t bits;
   uint32_t reg;
 
   DEBUGASSERT(gpio < RP23XX_GPIO_NUM);
@@ -407,8 +408,18 @@ void rp23xx_gpio_enable_irq(uint32_t gpio)
       /* Set interrupt enable bit */
 
       reg = RP23XX_IO_BANK0_PROC_INTE(gpio, 0);
+      if (g_gpio_irq_modes[gpio] == RP23XX_GPIO_INTR_EDGE_BOTH)
+        {
+          bits = (0x1 << ((gpio % 8) * 4 + RP23XX_GPIO_INTR_EDGE_LOW)) |
+                 (0x1 << ((gpio % 8) * 4 + RP23XX_GPIO_INTR_EDGE_HIGH));
+        }
+      else
+        {
+          bits = 0x1 << ((gpio % 8) * 4 + g_gpio_irq_modes[gpio]);
+        }
+
       clrbits_reg32(0xf << ((gpio % 8) * 4), reg);
-      setbits_reg32(0x1 << ((gpio % 8) * 4 + g_gpio_irq_modes[gpio]), reg);
+      setbits_reg32(bits, reg);
     }
 }
 

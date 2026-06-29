@@ -34,6 +34,14 @@ if(CONFIG_ARCH_BUTTONS)
   list(APPEND SRCS rp23xx_buttons.c)
 endif()
 
+if(CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_IR_RX)
+  list(APPEND SRCS rp23xx_fruitjam_ir.c)
+endif()
+
+if(CONFIG_RP23XX_I2S)
+  list(APPEND SRCS rp23xx_fruitjam_audio.c)
+endif()
+
 if(CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS)
   list(APPEND SRCS rp23xx_examples_romfs.c)
 endif()

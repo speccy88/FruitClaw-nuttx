@@ -39,7 +39,7 @@
 
 #include "rp23xx_pico.h"
 
-#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
 #  include <nuttx/wireless/esp_hosted.h>
 #  include "rp23xx_gpio.h"
 #  include "rp23xx_spi.h"
@@ -57,13 +57,17 @@
 #  include <nuttx/input/buttons.h>
 #endif
 
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_IR_RX
+int fruitjam_irrx_initialize(void);
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
 
 static bool g_board_bringup_done;
 
-#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
 static struct work_s g_fruitjam_esp_hosted_work;
 #endif
 
@@ -75,7 +79,7 @@ static struct work_s g_fruitjam_esp_hosted_work;
  * Name: fruitjam_esp_hosted_initialize
  ****************************************************************************/
 
-#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
 static int fruitjam_esp_hosted_reset(FAR void *arg, bool asserted)
 {
   UNUSED(arg);
@@ -258,7 +262,16 @@ int rp23xx_bringup(uintptr_t arg)
     }
 #endif
 
-#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_IR_RX
+  ret = fruitjam_irrx_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: fruitjam_irrx_initialize() failed: %d\n",
+             ret);
+    }
+#endif
+
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
 #ifdef CONFIG_SCHED_LPWORK
   clock_t delay;
 

@@ -60,6 +60,7 @@
 #define RP23XX_XOSC_BASE                 0x40048000  /* Controls the crystal oscillator */
 #define RP23XX_PLL_SYS_BASE              0x40050000
 #define RP23XX_PLL_USB_BASE              0x40058000
+#define RP23XX_ACCESSCTRL_BASE           0x40060000
 #define RP23XX_BUSCTRL_BASE              0x40068000  /* Register block for busfabric control signals and performance counters */
 #define RP23XX_UART0_BASE                0x40070000
 #define RP23XX_UART1_BASE                0x40078000

@@ -3,17 +3,12 @@ Fruit Jam NuttX examples
 
 Run these with source, for example:
 
-  source /examples/led_on.sh
-  source /examples/led_off.sh
   source /examples/neopixels_rainbow.sh
   source /examples/neopixels_fire.sh
   source /examples/neopixels_off.sh
 
 Direct commands:
 
-  userled on
-  userled off
-  userled blink 5 100
   neopixels rgb 255 0 0 64
   neopixels red 64
   neopixels green 64
@@ -24,10 +19,6 @@ Direct commands:
   neopixels pulse purple 6 35 128
 
 Variable-based helpers:
-
-  set BLINKS 5
-  set BLINK_MS 100
-  source /examples/led_blink.sh
 
   set NEO_R 255
   set NEO_G 0

@@ -37,6 +37,14 @@ ifeq ($(CONFIG_ARCH_BUTTONS),y)
   CSRCS += rp23xx_buttons.c
 endif
 
+ifeq ($(CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_IR_RX),y)
+CSRCS += rp23xx_fruitjam_ir.c
+endif
+
+ifeq ($(CONFIG_RP23XX_I2S),y)
+CSRCS += rp23xx_fruitjam_audio.c
+endif
+
 ifeq ($(CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS),y)
 CSRCS += rp23xx_examples_romfs.c
 endif

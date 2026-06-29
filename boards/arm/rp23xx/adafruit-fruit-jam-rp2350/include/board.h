@@ -54,7 +54,11 @@
 #define BOARD_PERI_FREQ         (150 * MHZ)
 #define BOARD_USB_FREQ          (48 * MHZ)
 #define BOARD_ADC_FREQ          (48 * MHZ)
-#define BOARD_HSTX_FREQ         (150 * MHZ)
+#ifdef CONFIG_RP23XX_HSTX_DVI
+#  define BOARD_HSTX_FREQ       (126 * MHZ)
+#else
+#  define BOARD_HSTX_FREQ       (150 * MHZ)
+#endif
 
 #define BOARD_UART_BASEFREQ     BOARD_PERI_FREQ
 

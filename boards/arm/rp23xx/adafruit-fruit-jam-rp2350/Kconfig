@@ -13,21 +13,30 @@ config ADAFRUIT_FRUIT_JAM_RP2350_NINA
 		networking path.  The first bring-up keeps networking disabled.
 
 config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
-	bool "Enable ESP-Hosted ESP32-C6 wlan0 bring-up"
+	bool "Enable ESP-Hosted ESP32-C6 support"
 	default n
 	depends on ESP_HOSTED_SPI && RP23XX_SPI1
 	select ADAFRUIT_FRUIT_JAM_RP2350_NINA
 	---help---
-		Use the onboard ESP32-C6 pins as an ESP-Hosted-MCU style Wi-Fi
-		coprocessor over SPI1.  This is the raw-frame hosted path intended
-		to become a true wlan0 NuttX network interface, not the Adafruit
-		NINA socket-command protocol.
+		Build support for using the onboard ESP32-C6 pins as an
+		ESP-Hosted-MCU style Wi-Fi coprocessor over SPI1.  This is the
+		raw-frame hosted path intended to become a true wlan0 NuttX network
+		interface, not the Adafruit NINA socket-command protocol.
 
 if ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+
+config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
+	bool "Automatically start ESP-Hosted during board bring-up"
+	default n
+	---help---
+		Start the ESP-Hosted SPI transport from board bring-up.  Keep this
+		disabled while validating the coprocessor firmware and SPI handshake
+		so USB CDC/NSH remains available for recovery.
 
 config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_START_DELAY_MS
 	int "ESP-Hosted deferred start delay in milliseconds"
 	default 2500
+	depends on ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
 	---help---
 		Delay ESP-Hosted initialization so USB CDC/NSH can become
 		interactive before the ESP32-C6 SPI control path starts.  This
@@ -42,6 +51,41 @@ config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_DIAG
 		Drive the active-low red LED as soon as the board-specific early
 		initialization hook runs.  This is useful while bringing up USB
 		console images that may fail before a serial console is available.
+
+config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+	bool "Enable diagnostic BOOTSEL recovery guard"
+	default n
+	depends on BOARDCTL_RESET
+	select SCHED_HPWORK
+	select WATCHDOG
+	---help---
+		Arm the RP23xx watchdog and a delayed BOOTSEL recovery worker early
+		in board start-up.  This is intended for unattended bring-up images:
+		if the image hangs before NSH is reachable, the next watchdog reset
+		enters BOOTSEL instead of endlessly rebooting the same image.  When
+		USB CDC/ACM minor 0 is configured by the host, the board disarms the
+		guard automatically.
+
+if ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+
+config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD_TIMEOUT_MS
+	int "Diagnostic BOOTSEL recovery timeout in milliseconds"
+	default 15000
+	range 1000 16000
+	---help---
+		RP23xx watchdog timeout used by the diagnostic recovery guard.  The
+		hardware limit is about 16 seconds.
+
+endif
+
+config ADAFRUIT_FRUIT_JAM_RP2350_IR_RX
+	bool "Enable GPIO29 IR receiver"
+	default n
+	depends on DRIVERS_RC
+	---help---
+		Register the Fruit Jam GPIO29 shared LED/IR pin as a raw LIRC
+		receiver at /dev/lirc0.  Enable this instead of USERLED support
+		when the IR receiver should own the pin.
 
 config ADAFRUIT_FRUIT_JAM_RP2350_EXAMPLES_ROMFS
 	bool "Mount baked example scripts at /examples"

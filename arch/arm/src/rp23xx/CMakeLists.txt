@@ -64,9 +64,18 @@ if(CONFIG_RP23XX_I2C_SLAVE)
   list(APPEND SRCS rp23xx_i2c_slave.c)
 endif()
 
+if(CONFIG_RP23XX_PSRAM)
+  list(APPEND SRCS rp23xx_psram.c)
+  list(APPEND SRCS rp23xx_heaps.c)
+endif()
+
 if(CONFIG_RP23XX_I2S)
   list(APPEND SRCS rp23xx_i2s.c)
   list(APPEND SRCS rp23xx_i2s_pio.c)
+endif()
+
+if(CONFIG_RP23XX_HSTX_DVI)
+  list(APPEND SRCS rp23xx_dvi.c)
 endif()
 
 if(CONFIG_USBDEV)

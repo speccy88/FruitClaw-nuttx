@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 #include <nuttx/debug.h>
+#include <nuttx/compiler.h>
 #include <errno.h>
 
 #include <nuttx/audio/audio.h>
@@ -37,6 +38,15 @@
 
 #include "arm_internal.h"
 #include "rp23xx_i2s.h"
+
+/****************************************************************************
+ * Weak Functions
+ ****************************************************************************/
+
+int weak_function board_i2sdev_codec_initialize(int port)
+{
+  return OK;
+}
 
 /****************************************************************************
  * Public Functions
@@ -60,10 +70,25 @@ int board_i2sdev_initialize(int port)
 
   ainfo("Initializing I2S\n");
 
+  ret = board_i2sdev_codec_initialize(port);
+  if (ret < 0)
+    {
+      auderr("ERROR: Failed to initialize I2S codec: %d\n", ret);
+    }
+
   i2s = rp23xx_i2sbus_initialize(port);
+  if (i2s == NULL)
+    {
+      auderr("ERROR: Failed to initialize I2S bus\n");
+      return -ENODEV;
+    }
 
 #ifdef CONFIG_AUDIO_I2SCHAR
-  i2schar_register(i2s, 0);
+  ret = i2schar_register(i2s, 0);
+  if (ret < 0)
+    {
+      auderr("ERROR: Failed to register /dev/i2schar0: %d\n", ret);
+    }
 #endif
 
   audio_i2s = audio_i2s_initialize(i2s, true);

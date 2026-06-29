@@ -81,6 +81,7 @@
 #define RP23XX_GPIO_INTR_LEVEL_HIGH 1
 #define RP23XX_GPIO_INTR_EDGE_LOW   2
 #define RP23XX_GPIO_INTR_EDGE_HIGH  3
+#define RP23XX_GPIO_INTR_EDGE_BOTH  4
 
 /****************************************************************************
  * Public Types

@@ -41,6 +41,7 @@
 #include <errno.h>
 
 #include <nuttx/debug.h>
+#include <nuttx/board.h>
 #include <nuttx/irq.h>
 #include <nuttx/kmalloc.h>
 #include <nuttx/queue.h>
@@ -343,6 +344,20 @@ static const struct uart_ops_s g_uartops =
 /* Mutex to protect device initialization / uninitialization*****************/
 
 static mutex_t g_init_lock = NXMUTEX_INITIALIZER;
+
+/****************************************************************************
+ * Weak Board Hooks
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: board_cdcacm_connected
+ ****************************************************************************/
+
+void weak_function board_cdcacm_connected(int minor, bool connected)
+{
+  UNUSED(minor);
+  UNUSED(connected);
+}
 
 /****************************************************************************
  * Private Functions
@@ -937,6 +952,7 @@ static void cdcacm_resetconfig(FAR struct cdcacm_dev_s *priv)
 #ifdef CONFIG_SERIAL_REMOVABLE
       uart_connected(&priv->serdev, false);
 #endif
+      board_cdcacm_connected(priv->minor, false);
 
       /* Disable endpoints.  This should force completion of all pending
        * transfers.
@@ -1087,6 +1103,7 @@ static int cdcacm_setconfig(FAR struct cdcacm_dev_s *priv, uint8_t config)
 #ifdef CONFIG_SERIAL_REMOVABLE
   uart_connected(&priv->serdev, true);
 #endif
+  board_cdcacm_connected(priv->minor, true);
 
   return OK;
 

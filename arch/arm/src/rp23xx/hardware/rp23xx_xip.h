@@ -33,6 +33,8 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
+#define RP23XX_XIP_BASE                 RP23XX_XIP_CTRL_BASE
+
 /* Register offsets *********************************************************/
 
 #define RP23XX_XIP_CTRL_OFFSET          0x00000000
