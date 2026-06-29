@@ -31,7 +31,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include <nuttx/clock.h>
 #include <nuttx/fs/fs.h>
+#include <nuttx/wqueue.h>
 
 #include <arch/board/board.h>
 
@@ -60,6 +62,10 @@
  ****************************************************************************/
 
 static bool g_board_bringup_done;
+
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+static struct work_s g_fruitjam_esp_hosted_work;
+#endif
 
 /****************************************************************************
  * Private Functions
@@ -153,6 +159,20 @@ static int fruitjam_esp_hosted_initialize(void)
 
   return esp_hosted_spi_initialize(&config);
 }
+
+static void fruitjam_esp_hosted_worker(FAR void *arg)
+{
+  int ret;
+
+  UNUSED(arg);
+
+  ret = fruitjam_esp_hosted_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_WARNING,
+             "WARNING: ESP-Hosted wlan0 bring-up not ready: %d\n", ret);
+    }
+}
 #endif
 
 /****************************************************************************
@@ -239,12 +259,22 @@ int rp23xx_bringup(uintptr_t arg)
 #endif
 
 #ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
-  ret = fruitjam_esp_hosted_initialize();
+#ifdef CONFIG_SCHED_LPWORK
+  clock_t delay;
+
+  delay = MSEC2TICK(
+    CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_START_DELAY_MS);
+  ret = work_queue(LPWORK, &g_fruitjam_esp_hosted_work,
+                   fruitjam_esp_hosted_worker, NULL, delay);
   if (ret < 0)
     {
       syslog(LOG_WARNING,
-             "WARNING: ESP-Hosted wlan0 bring-up not ready: %d\n", ret);
+             "WARNING: failed to defer ESP-Hosted wlan0 bring-up: %d\n",
+             ret);
     }
+#else
+  fruitjam_esp_hosted_worker(NULL);
+#endif
 #endif
 
   g_board_bringup_done = true;

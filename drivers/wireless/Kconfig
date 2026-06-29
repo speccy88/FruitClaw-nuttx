@@ -110,13 +110,37 @@ menuconfig ESP_HOSTED
 	select DRIVERS_IEEE80211
 	select NETDEV_WIRELESS_IOCTL
 	select NETDEV_WIRELESS_HANDLER
-	select SCHED_HPWORK
 	---help---
 		Enable support for Espressif ESP-Hosted-MCU style Wi-Fi
 		coprocessors.  This is the raw-frame hosted path, not the
 		Adafruit NINA socket-command firmware path.
 
 if ESP_HOSTED
+
+choice ESP_HOSTED_WORKQUEUE
+	prompt "ESP-Hosted worker queue"
+	default ESP_HOSTED_HPWORK
+	---help---
+		Select the work queue used for ESP-Hosted data-ready bottom-half
+		processing and startup probing.
+
+config ESP_HOSTED_HPWORK
+	bool "High-priority work queue"
+	select SCHED_HPWORK
+	---help---
+		Use the high-priority worker.  This is appropriate when the
+		ESP-Hosted transport is trusted and should run as a conventional
+		driver bottom half.
+
+config ESP_HOSTED_LPWORK
+	bool "Low-priority work queue"
+	select SCHED_LPWORK
+	---help---
+		Use the low-priority worker.  This is useful during board bring-up
+		or on systems where slow coprocessor handshakes must not starve an
+		interactive console.
+
+endchoice
 
 config ESP_HOSTED_SPI
 	bool "ESP-Hosted SPI full-duplex transport"

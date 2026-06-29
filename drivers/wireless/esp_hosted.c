@@ -106,6 +106,12 @@
 #define ESP_HOSTED_WIFI_AUTH_WPA2_WPA3   7
 #define ESP_HOSTED_SCAN_MAX_APS          12
 
+#ifdef CONFIG_ESP_HOSTED_LPWORK
+#  define ESP_HOSTED_WORK_QUEUE          LPWORK
+#else
+#  define ESP_HOSTED_WORK_QUEUE          HPWORK
+#endif
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
@@ -2197,7 +2203,8 @@ static void esp_hosted_schedule_rx_work(FAR struct esp_hosted_driver_s *priv)
 
   if (work_available(&priv->rx_work))
     {
-      ret = work_queue(HPWORK, &priv->rx_work, esp_hosted_rx_work, priv, 0);
+      ret = work_queue(ESP_HOSTED_WORK_QUEUE, &priv->rx_work,
+                       esp_hosted_rx_work, priv, 0);
       if (ret >= 0)
         {
           priv->stats.rx_work_count++;

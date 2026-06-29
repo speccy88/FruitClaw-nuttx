@@ -23,6 +23,18 @@ config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
 		to become a true wlan0 NuttX network interface, not the Adafruit
 		NINA socket-command protocol.
 
+if ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED
+
+config ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_START_DELAY_MS
+	int "ESP-Hosted deferred start delay in milliseconds"
+	default 2500
+	---help---
+		Delay ESP-Hosted initialization so USB CDC/NSH can become
+		interactive before the ESP32-C6 SPI control path starts.  This
+		keeps the recovery shell available during coprocessor bring-up.
+
+endif
+
 config ADAFRUIT_FRUIT_JAM_RP2350_BOOT_DIAG
 	bool "Enable early GPIO29 boot diagnostic"
 	default n

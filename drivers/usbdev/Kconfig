@@ -431,6 +431,7 @@ endif # PL2303
 menuconfig CDCACM
 	bool "USB Modem (CDC/ACM) support"
 	default n
+	select ARCH_HAVE_SERIAL_TERMIOS
 	select SERIAL_REMOVABLE
 	select SERIAL_RXDMA if !CDCACM_DISABLE_RXBUF
 	select SERIAL_TXDMA if !CDCACM_DISABLE_TXBUF
