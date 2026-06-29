@@ -54,12 +54,35 @@
 #include "rp23xx_xosc.h"
 #include "rp23xx_pll.h"
 #include "hardware/rp23xx_clocks.h"
+#include "hardware/rp23xx_powman.h"
 #include "hardware/rp23xx_resets.h"
 #include "hardware/rp23xx_ticks.h"
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
+
+#ifndef BOARD_PLL_SYS_REFDIV
+#  define BOARD_PLL_SYS_REFDIV 1
+#endif
+
+#ifndef BOARD_PLL_SYS_VCO_FREQ
+#  define BOARD_PLL_SYS_VCO_FREQ (1500 * MHZ)
+#endif
+
+#ifndef BOARD_PLL_SYS_POSTDIV1
+#  define BOARD_PLL_SYS_POSTDIV1 5
+#endif
+
+#ifndef BOARD_PLL_SYS_POSTDIV2
+#  define BOARD_PLL_SYS_POSTDIV2 2
+#endif
+
+#ifdef BOARD_VREG_VSEL
+#  define RP23XX_POWMAN_PASSWORD_BITS (0x5afe0000)
+#  define RP23XX_POWMAN_VREG_VSEL_SHIFT 4
+#  define RP23XX_VREG_UPDATE_TIMEOUT 1000000
+#endif
 
 /****************************************************************************
  * Private Data
@@ -82,6 +105,38 @@ static inline bool has_glitchless_mux(int clk_index)
   return clk_index == RP23XX_CLOCKS_NDX_SYS ||
          clk_index == RP23XX_CLOCKS_NDX_REF;
 }
+
+#ifdef BOARD_VREG_VSEL
+static void rp23xx_clock_configure_vreg(void)
+{
+  uint32_t regval;
+  uint32_t timeout;
+
+  setbits_reg32(RP23XX_POWMAN_PASSWORD_BITS |
+                RP23XX_POWMAN_VREG_CTRL_UNLOCK,
+                RP23XX_POWMAN_VREG_CTRL);
+
+  timeout = RP23XX_VREG_UPDATE_TIMEOUT;
+  while ((getreg32(RP23XX_POWMAN_VREG) &
+          RP23XX_POWMAN_VREG_UPDATE_IN_PROGRESS) != 0 &&
+         timeout-- > 0)
+    ;
+
+  regval = getreg32(RP23XX_POWMAN_VREG);
+  regval &= ~RP23XX_POWMAN_VREG_VSEL_MASK;
+  regval |= RP23XX_POWMAN_PASSWORD_BITS |
+            (BOARD_VREG_VSEL << RP23XX_POWMAN_VREG_VSEL_SHIFT);
+  putreg32(regval, RP23XX_POWMAN_VREG);
+
+  timeout = RP23XX_VREG_UPDATE_TIMEOUT;
+  while ((getreg32(RP23XX_POWMAN_VREG) &
+          RP23XX_POWMAN_VREG_UPDATE_IN_PROGRESS) != 0 &&
+         timeout-- > 0)
+    ;
+
+  up_mdelay(10);
+}
+#endif
 
 #if defined(CONFIG_RP23XX_CLK_GPOUT_ENABLE)
 static bool rp23xx_clock_configure_gpout(int clk_index,
@@ -229,10 +284,17 @@ void clocks_init(void)
   while (getreg32(RP23XX_CLOCKS_CLK_REF_SELECTED) != 1)
     ;
 
-  /* Configure PLLs
-   *                   REF     FBDIV VCO     POSTDIV
-   * PLL SYS: 12 / 1 = 12MHz * 125 = 1500MHz / 5 / 2 = 150MHz
-   * PLL USB: 12 / 1 = 12MHz * 100 = 1200MHz / 5 / 5 =  48MHz
+#ifdef BOARD_VREG_VSEL
+  rp23xx_clock_configure_vreg();
+#endif
+
+  /* Configure PLLs.
+   *
+   * Boards may override the SYS PLL parameters when an exact peripheral
+   * clock is required. The default remains:
+   *
+   *   PLL SYS: 12 / 1 = 12MHz * 125 = 1500MHz / 5 / 2 = 150MHz
+   *   PLL USB: 12 / 1 = 12MHz * 100 = 1200MHz / 5 / 5 =  48MHz
    */
 
   setbits_reg32(RP23XX_RESETS_RESET_PLL_SYS | RP23XX_RESETS_RESET_PLL_USB,
@@ -243,7 +305,9 @@ void clocks_init(void)
          (RP23XX_RESETS_RESET_PLL_SYS | RP23XX_RESETS_RESET_PLL_USB))
     ;
 
-  rp23xx_pll_init(RP23XX_PLL_SYS_BASE, 1, 1500 * MHZ, 5, 2);
+  rp23xx_pll_init(RP23XX_PLL_SYS_BASE, BOARD_PLL_SYS_REFDIV,
+                  BOARD_PLL_SYS_VCO_FREQ, BOARD_PLL_SYS_POSTDIV1,
+                  BOARD_PLL_SYS_POSTDIV2);
   rp23xx_pll_init(RP23XX_PLL_USB_BASE, 1, 1200 * MHZ, 5, 5);
 
   /* Configure clocks */

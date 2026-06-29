@@ -61,6 +61,10 @@
 int fruitjam_irrx_initialize(void);
 #endif
 
+#ifdef CONFIG_RP23XX_I2S
+int fruitjam_audio_codec_initialize(void);
+#endif
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -234,6 +238,16 @@ int rp23xx_bringup(uintptr_t arg)
 #endif /* CONFIG_ARCH_BOARD_COMMON */
 
   /* --- Place any board specific bringup code here --- */
+
+#ifdef CONFIG_RP23XX_I2S
+  ret = fruitjam_audio_codec_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR,
+             "ERROR: failed to initialize Fruit Jam audio codec: %d\n",
+             ret);
+    }
+#endif
 
 #ifdef CONFIG_FS_TMPFS
   rp23xx_mount_tmpfs("/tmp");

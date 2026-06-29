@@ -92,6 +92,16 @@
 #  define CONFIG_RP23XX_RV_I2S_DATALEN 16
 #endif
 
+#if CONFIG_RP23XX_RV_I2S_PIO == 0
+#  define RP23XX_RV_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO0
+#elif CONFIG_RP23XX_RV_I2S_PIO == 1
+#  define RP23XX_RV_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO1
+#elif CONFIG_RP23XX_RV_I2S_PIO == 2
+#  define RP23XX_RV_I2S_GPIO_FUNC RP23XX_GPIO_FUNC_PIO2
+#else
+#  error Invalid CONFIG_RP23XX_RV_I2S_PIO
+#endif
+
 #if CONFIG_RP23XX_RV_I2S_DATALEN == 8
 #  define RP23XX_RV_I2S_DATAMASK  0
 #elif CONFIG_RP23XX_RV_I2S_DATALEN == 16
@@ -966,6 +976,7 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
                             unsigned long arg)
 {
   struct rp23xx_i2s_s *priv = (struct rp23xx_i2s_s *)dev;
+  struct ap_buffer_info_s *bufinfo;
   struct audio_buf_desc_s *bufdesc;
   int ret = -ENOTTY;
 
@@ -1118,6 +1129,22 @@ static int rp23xx_i2s_ioctl(struct i2s_dev_s *dev, int cmd,
         }
         break;
 
+      /* AUDIOIOC_GETBUFFERINFO - Get preferred buffer sizing
+       *
+       *   ioctl argument: pointer to an ap_buffer_info_s structure
+       */
+
+      case AUDIOIOC_GETBUFFERINFO:
+        {
+          i2sinfo("AUDIOIOC_GETBUFFERINFO\n");
+
+          bufinfo = (struct ap_buffer_info_s *)arg;
+          bufinfo->buffer_size = CONFIG_AUDIO_BUFFER_NUMBYTES;
+          bufinfo->nbuffers = CONFIG_AUDIO_NUM_BUFFERS;
+          ret = OK;
+        }
+        break;
+
       default:
         break;
     }
@@ -1248,11 +1275,11 @@ static void i2s_configure(struct rp23xx_i2s_s *priv)
   if (!priv->initialized)
     {
       rp23xx_gpio_set_function(CONFIG_RP23XX_RV_I2S_DATA,
-                               RP23XX_GPIO_FUNC_PIO0);
+                               RP23XX_RV_I2S_GPIO_FUNC);
       rp23xx_gpio_set_function(CONFIG_RP23XX_RV_I2S_CLOCK,
-                               RP23XX_GPIO_FUNC_PIO0);
+                               RP23XX_RV_I2S_GPIO_FUNC);
       rp23xx_gpio_set_function(CONFIG_RP23XX_RV_I2S_CLOCK + 1,
-                               RP23XX_GPIO_FUNC_PIO0);
+                               RP23XX_RV_I2S_GPIO_FUNC);
 
       priv->initialized = true;
     }

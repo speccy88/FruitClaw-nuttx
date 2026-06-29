@@ -46,18 +46,30 @@
 
 #define BOARD_XOSC_FREQ         (12 * MHZ)
 #define BOARD_XOSC_STARTUPDELAY 11
-#define BOARD_PLL_SYS_FREQ      (150 * MHZ)
+
+/* Match the known-good wili8jam clock plan: raise VREG to 1.30 V, run
+ * clk_sys at 252 MHz, then divide CLK_HSTX to the exact 126 MHz DVI clock.
+ * CLK_HSTX only has an integer divider, so the default 150 MHz SYS PLL
+ * cannot produce the required 126 MHz HSTX clock.
+ */
+
+#define BOARD_VREG_VSEL         0x0f /* 1.30 V */
+#define BOARD_PLL_SYS_REFDIV    1
+#define BOARD_PLL_SYS_VCO_FREQ  (1260 * MHZ)
+#define BOARD_PLL_SYS_POSTDIV1  5
+#define BOARD_PLL_SYS_POSTDIV2  1
+#define BOARD_PLL_SYS_FREQ      (252 * MHZ)
 #define BOARD_PLL_USB_FREQ      (48 * MHZ)
 
 #define BOARD_REF_FREQ          (12 * MHZ)
-#define BOARD_SYS_FREQ          (150 * MHZ)
-#define BOARD_PERI_FREQ         (150 * MHZ)
+#define BOARD_SYS_FREQ          (252 * MHZ)
+#define BOARD_PERI_FREQ         BOARD_SYS_FREQ
 #define BOARD_USB_FREQ          (48 * MHZ)
 #define BOARD_ADC_FREQ          (48 * MHZ)
 #ifdef CONFIG_RP23XX_HSTX_DVI
 #  define BOARD_HSTX_FREQ       (126 * MHZ)
 #else
-#  define BOARD_HSTX_FREQ       (150 * MHZ)
+#  define BOARD_HSTX_FREQ       BOARD_SYS_FREQ
 #endif
 
 #define BOARD_UART_BASEFREQ     BOARD_PERI_FREQ

@@ -786,8 +786,29 @@ config RP23XX_HSTX_DVI
 	select RP23XX_DMAC
 	---help---
 		Enable a 640x480@60Hz DVI signal using the RP2350 HSTX block.
-		The exported /dev/fb0 framebuffer is 128x128 RGB565 and is
-		scaled 3x into the active DVI area.
+		The exported /dev/fb0 framebuffer is 320x240 RGB565 and is
+		scaled 2x into the active DVI area.
+
+if RP23XX_HSTX_DVI
+
+config RP23XX_HSTX_DVI_OUTPUT_SCALING
+	int "HSTX DVI framebuffer output scaling"
+	default 2
+	range 1 2
+	---help---
+		Scale the 320x240 RGB565 framebuffer into the 640x480 active
+		DVI area. 2 fills the active area. 1 centers the framebuffer
+		with black borders and is useful as a low-bandwidth diagnostic.
+
+config RP23XX_HSTX_DVI_BLACKOUT
+	bool "HSTX DVI black-only diagnostic scanout"
+	default n
+	---help---
+		Only stream legal black DVI timing over HSTX. The framebuffer device
+		still exists and can be filled, but scanout does not DMA framebuffer
+		pixels. This isolates HSTX timing/control DMA from framebuffer DMA.
+
+endif # RP23XX_HSTX_DVI
 
 #####################################################################
 #  SPISD Configuration

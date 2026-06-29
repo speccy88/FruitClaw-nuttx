@@ -227,4 +227,9 @@ int board_i2sdev_codec_initialize(int port)
   return OK;
 }
 
+int fruitjam_audio_codec_initialize(void)
+{
+  return board_i2sdev_codec_initialize(0);
+}
+
 #endif /* CONFIG_RP23XX_I2S */
