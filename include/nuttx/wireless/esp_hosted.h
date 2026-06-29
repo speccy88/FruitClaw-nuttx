@@ -123,10 +123,21 @@ begin_packed_struct struct esp_hosted_payload_header_s
 struct esp_hosted_stats_s
 {
   uint32_t reset_count;
+  uint32_t dataready_irq_count;
+  uint32_t rx_work_count;
   uint32_t spi_transaction_count;
   uint32_t rx_frame_count;
   uint32_t tx_frame_count;
+  uint32_t tx_dummy_count;
+  uint32_t rx_dummy_count;
+  uint32_t rx_priv_count;
+  uint32_t rx_init_event_count;
+  uint32_t rx_control_count;
+  uint32_t rx_sta_count;
+  uint32_t rx_ap_count;
+  uint32_t rx_unknown_count;
   uint32_t malformed_frame_count;
+  uint32_t checksum_error_count;
   uint32_t control_timeout_count;
 };
 

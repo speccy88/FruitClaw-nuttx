@@ -108,6 +108,8 @@ menuconfig ESP_HOSTED
 	select SPI
 	select DRIVERS_IEEE80211
 	select NETDEV_WIRELESS_IOCTL
+	select NETDEV_WIRELESS_HANDLER
+	select SCHED_HPWORK
 	---help---
 		Enable support for Espressif ESP-Hosted-MCU style Wi-Fi
 		coprocessors.  This is the raw-frame hosted path, not the

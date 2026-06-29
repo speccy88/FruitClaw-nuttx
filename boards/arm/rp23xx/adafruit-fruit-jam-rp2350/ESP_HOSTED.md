@@ -33,10 +33,16 @@ onboard ESP32-C6 pin setup.
 
 The scaffold validates the configured SPI/GPIO callbacks, attaches the
 data-ready IRQ when the board provides one, resets the coprocessor, configures
-SPI, and performs one 1600-byte full-duplex prime transaction if the handshake
-line is already ready after reset. It intentionally returns `-ENOSYS` and does
-not register `wlan0` until ESP-Hosted INIT/control exchange and the data path
-are implemented.
+SPI, and uses 1600-byte ESP-Hosted full-duplex frames. The host now sends a
+valid dummy header (`ESP_MAX_IF`) instead of an all-zero buffer, schedules
+data-ready service on `HPWORK`, validates incoming hosted headers and
+checksums, counts private/control/station/AP frames, and recognizes
+`ESP_PRIV_EVENT_INIT`.
+
+It intentionally returns `-ENOSYS` and does not register `wlan0` until
+ESP-Hosted RPC requests/responses and the data path are implemented. That
+keeps the port from exposing a fake network interface before NuttX can really
+own DHCP/IP/sockets.
 
 ## RP2350-Side Pins
 
@@ -122,6 +128,7 @@ CONFIG_ESP_HOSTED_SPI=y
 CONFIG_ESP_HOSTED_WLAN=y
 CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED=y
 CONFIG_NETDEV_WIRELESS_IOCTL=y
+CONFIG_NETDEV_WIRELESS_HANDLER=y
 CONFIG_DRIVERS_IEEE80211=y
 CONFIG_NETUTILS_DHCPC=y
 CONFIG_NETUTILS_DNSCLIENT=y
@@ -136,7 +143,7 @@ Additional app/service symbols should be added once `wlan0` is real:
 | ID | Milestone | Current state | Evidence needed |
 | --- | --- | --- | --- |
 | A | ESP32-C6 reset works from RP2350 | Partial | Scope trace or ESP firmware log after NuttX reset callback |
-| B | SPI exchanges valid ESP-Hosted control frames | Partial scaffold | Host receives valid ESP-Hosted INIT or RPC response |
+| B | SPI exchanges valid ESP-Hosted control frames | In progress | Host receives valid ESP-Hosted INIT or RPC response |
 | C | NuttX gets coprocessor version/MAC | Not started | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
 | D | Scan returns AP records | Not started | `wapi scan wlan0` or equivalent returns AP list |
 | E | Connect and carrier event | Not started | Connected event toggles NuttX carrier on |
@@ -179,14 +186,13 @@ wget http://<test-host>/
 
 ## Near-Term Driver Tasks
 
-1. Implement ESP-Hosted SPI full-duplex transactions with 1600-byte frames.
-2. Wait for handshake before each host transaction and use data-ready IRQ for
-   coprocessor RX service.
-3. Parse `ESP_HOSTED_PRIV_EVENT_INIT`.
-4. Add RPC endpoint routing for `RPCRsp` and `RPCEvt`.
-5. Implement version/MAC RPC requests before registering `wlan0`.
-6. Add `netdev_lowerhalf_s` registration with `NET_LL_IEEE80211`.
-7. Map NuttX wireless operations to ESP-Hosted RPCs for scan, connect,
+1. Add RPC endpoint routing for `RPCRsp` and `RPCEvt`.
+2. Add enough protobuf encode/decode support for `GetCoprocessorFwVersion`,
+   `GetMacAddress`, `WifiInit`, and `WifiStart`.
+3. Implement version/MAC RPC requests before registering `wlan0`.
+4. Add `netdev_lowerhalf_s` registration with `NET_LL_IEEE80211` only after
+   the control plane can identify the coprocessor.
+5. Map NuttX wireless operations to ESP-Hosted RPCs for scan, connect,
    disconnect, RSSI, MAC, and link state.
-8. Wrap NuttX TX packets as ESP-Hosted station data frames and deliver RX
+6. Wrap NuttX TX packets as ESP-Hosted station data frames and deliver RX
    station frames into the NuttX stack.
