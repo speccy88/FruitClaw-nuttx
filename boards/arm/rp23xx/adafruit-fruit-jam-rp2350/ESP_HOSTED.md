@@ -74,6 +74,11 @@ records for WAPI. Carrier is turned on/off only from real
 `Event_StaConnected` (`775`) and `Event_StaDisconnected` (`776`)
 notifications from the coprocessor.
 
+As of the 2026-06-29 hardware run, this path is no longer just a scaffold:
+Fruit Jam boots the ESP-Hosted profile, registers `wlan0`, scans, associates,
+gets DHCP/DNS, passes ICMP, makes TCP client connections, accepts inbound
+telnet, and recovers after an explicit WAPI disconnect/reconnect cycle.
+
 ## RP2350-Side Pins
 
 These pins are the existing Fruit Jam NINA/AirLift-style wiring on the RP2350
@@ -172,7 +177,10 @@ CONFIG_NET_IPv4=y
 CONFIG_NET_TCP=y
 CONFIG_NET_UDP=y
 CONFIG_NET_ICMP=y
+CONFIG_NET_ICMP_SOCKET=y
 CONFIG_NET_ARP=y
+CONFIG_ARP_SEND_MAXTRIES=10
+CONFIG_ARP_SEND_DELAYMSEC=100
 CONFIG_NETDEVICES=y
 CONFIG_NETDEV_LATEINIT=y
 CONFIG_DRIVERS_WIRELESS=y
@@ -192,6 +200,11 @@ The profile also includes WAPI tooling, DHCP, DNS, `ping`, `wget`, and
 `telnetd` so early link tests can run from NSH. HTTP/FTP servers and broader
 socket tests can be added after basic `wlan0` traffic is proven.
 
+The ARP retry window is intentionally longer than the NuttX default. With the
+default 5 tries at 20 ms, a first same-LAN TCP connection could fail with
+`-ENETUNREACH` before the Wi-Fi ARP reply arrived. The current profile uses 10
+tries at 100 ms and cold local `wget` succeeds without a manual warm-up ping.
+
 ## Build Evidence
 
 Built locally on 2026-06-29:
@@ -199,24 +212,28 @@ Built locally on 2026-06-29:
 | Profile | Result | FLASH | RAM | Notes |
 | --- | --- | ---: | ---: | --- |
 | `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406576 B | 51060 B | Baseline image after returning from hosted config |
-| `adafruit-fruit-jam-rp2350:esp-hosted` | Pass | 489080 B | 70016 B | Named defconfig with `CONFIG_ESP_HOSTED_WLAN=y`, WAPI, DHCP, DNS, `ping`, `wget`, and `telnetd` compiled |
+| `adafruit-fruit-jam-rp2350:esp-hosted` | Pass | 496124 B | 70944 B | Named defconfig with `CONFIG_ESP_HOSTED_WLAN=y`, WAPI, DHCP, DNS, ICMP sockets, ARP retry tuning, `wget`, and `telnetd` compiled |
 | ESP32-C6 ESP-Hosted-MCU slave | Pass | 1026464 B | n/a | Upstream `esp-hosted-mcu` commit `8f0770d39065c2a9ff6828268709c3502e0d5349`, ESP-IDF 5.5.4, Fruit Jam defaults overlay, `merged-binary.bin` SHA256 `a7e78def271dc2a21c6983ce2dd5883b7e95a7c6576fae263edda82c5dceec6c` |
 
 ## Validation Milestones
 
-| ID | Milestone | Current state | Evidence needed |
+| ID | Milestone | Current state | 2026-06-29 evidence |
 | --- | --- | --- | --- |
-| A | ESP32-C6 reset works from RP2350 | Partial | Schematic maps RP2350 GPIO22/PERIPH_RST to C6 EN; need scope trace or ESP firmware log after NuttX reset callback |
-| B | SPI exchanges valid ESP-Hosted control frames | In progress | Fruit Jam C6 SPI pins are mapped and a slave defaults file exists; host still needs valid ESP-Hosted INIT or RPC response |
-| C | NuttX gets coprocessor version/MAC | In progress | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
-| D | Scan returns AP records | In progress | `WifiScanStart`, `Event_StaScanDone`, `WifiScanGetApRecords`, and WAPI result formatting are implemented; hardware validation still needed |
-| E | Connect and carrier event | In progress | `WifiSetConfig`/`WifiConnect` requests and STA connected/disconnected carrier handling are implemented |
-| F | `wlan0` appears | In progress | `ifconfig wlan0` shows a registered netdev after version/MAC RPCs |
-| G | DHCP through NuttX | Not started | NuttX DHCP client assigns `wlan0` IPv4 address |
-| H | Ping works | Not started | `ping <gateway>` succeeds through `wlan0` |
-| I | TCP client works | Not started | NuttX TCP client or `wget` succeeds |
-| J | Inbound service works | Not started | telnet, HTTP, or FTP service reachable over `wlan0` |
-| K | Reconnect/reset recovery works | Not started | Reset or AP reconnect returns `wlan0` to service |
+| A | ESP32-C6 reset works from RP2350 | Pass | Fresh RP2350 flash/reboot reset the C6 path; `esphostedctl` reported `reset=1`, `init_event=1`, and successful identity RPCs |
+| B | SPI exchanges valid ESP-Hosted control frames | Pass | `esphostedctl` reported control frames and RPC responses with `control_timeout=0`, `malformed_frame=0`, `checksum_error=0`, and `tlv_error=0` |
+| C | NuttX gets coprocessor version/MAC | Pass | `esphostedctl` reported `fwversion=1`, `mac=1`; `ifconfig wlan0` showed `HWaddr 58:e6:c5:f5:a3:58` |
+| D | Scan returns AP records | Pass | `wapi scan wlan0` returned 12 AP records, including the target SSID |
+| E | Connect and carrier event | Pass | `wapi essid wlan0 <ssid> 1` associated; `ifconfig wlan0` showed `RUNNING`; `esphostedctl` reported `link_up=2` after reconnect test |
+| F | `wlan0` appears | Pass | `ifconfig wlan0` showed a registered `NET_LL_IEEE80211` netdev after version/MAC RPCs |
+| G | DHCP through NuttX | Pass | `renew wlan0` assigned `192.168.1.7`, default router `192.168.1.1`, mask `255.255.255.0` |
+| H | Ping works | Pass | `ping -c 2 -I wlan0 192.168.1.1` and `ping -c 1 -I wlan0 example.com` both returned 0% packet loss |
+| I | TCP client works | Pass | Cold `wget http://192.168.1.234:18080/` returned the local test page; `wget http://example.com/` returned the Example Domain page |
+| J | Inbound service works | Pass | `telnetd` accepted a host connection to `192.168.1.7:23` and returned the `NuttShell (NSH)` banner and prompt |
+| K | Reconnect/reset recovery works | Pass | `wapi disconnect wlan0` dropped carrier; re-applying PSK/ESSID plus `renew wlan0` restored `RUNNING` and gateway ping; `esphostedctl` reported `disconnect=1`, `link_down=1`, `connect=2`, `link_up=2` |
+
+The same flashed image also passed a USB CDC / NSH editing smoke test:
+up-arrow history recall re-ran the previous command, and left-arrow insertion
+produced `echo abcXYZdef` without hanging the shell.
 
 ## Bring-Up Commands
 
@@ -236,27 +253,33 @@ cd /Users/fred/Documents/FruitClaw/nuttx
 make -j8
 ```
 
-Runtime validation commands once `wlan0` is implemented:
+Runtime validation commands:
 
 ```sh
-ifconfig
+ifup wlan0
+wapi psk wlan0 <passphrase> 3 2
+wapi essid wlan0 <ssid> 1
+renew wlan0
 ifconfig wlan0
 wapi scan wlan0
-ifconfig wlan0 dhcp
-ping <gateway-ip>
-wget http://<test-host>/
+ping -c 3 -I wlan0 <gateway-ip>
+ping -c 1 -I wlan0 example.com
+wget http://<same-lan-test-host>:18080/
+wget http://example.com/
+telnetd
+wapi disconnect wlan0
+wapi psk wlan0 <passphrase> 3 2
+wapi essid wlan0 <ssid> 1
+renew wlan0
+esphostedctl
 ```
 
 ## Near-Term Driver Tasks
 
-1. Validate the initial `WifiInit`/`SetWifiMode`/`WifiStart` sequence against
-   a Fruit Jam ESP32-C6 running ESP-Hosted-MCU firmware.
-2. Validate `wapi scan wlan0` against ESP-Hosted-MCU firmware, then expand AP
-   record fetching beyond the current conservative 12-record SPI-frame batch.
-3. Add RSSI/link-state/MAC query support where NuttX wireless tooling expects
+1. Expand AP record fetching beyond the current conservative 12-record
+   SPI-frame batch.
+2. Add RSSI/link-state/MAC query support where NuttX wireless tooling expects
    it.
-4. Verify that received `ESP_STA_IF` payloads are in the exact link-layer
-   format expected by the registered NuttX netdev type.
-5. Bring up DHCP, DNS, ping, and TCP/UDP service tests through `wlan0`.
-6. Build and flash the ESP-Hosted-MCU Fruit Jam C6 firmware with the local
-   defaults overlay, then validate the first `ESP_PRIV_EVENT_INIT` handshake.
+3. Add UDP, HTTP-server, and FTP service tests through `wlan0`.
+4. Stress longer reboot/AP-loss/reconnect runs and raise SPI clock only after
+   the error counters stay clean.
