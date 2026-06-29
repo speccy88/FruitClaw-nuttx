@@ -94,17 +94,29 @@ sequencing conservative while bring-up is in progress.
 
 ## ESP32-C6-Side Pins
 
-Do not hardcode ESP32-C6 slave firmware GPIOs until they are confirmed from the
-Fruit Jam schematic or board definition. ESP-Hosted-MCU exposes these settings
-through the slave project Kconfig:
+The ESP32-C6-side pins have now been checked against the official Adafruit
+Fruit Jam Eagle schematic from `adafruit/Adafruit-Fruit-Jam-PCB` commit
+`252dc09456ee447b3d7eeb4fa99877898503e81a`. The RP2350-side names were also
+cross-checked against the CircuitPython Fruit Jam board definition at commit
+`44171479b70f0cf71e09a68d89507bfb8657057f`.
 
-- `CONFIG_ESP_SPI_HSPI_GPIO_MOSI`
-- `CONFIG_ESP_SPI_HSPI_GPIO_MISO`
-- `CONFIG_ESP_SPI_HSPI_GPIO_CLK`
-- `CONFIG_ESP_SPI_HSPI_GPIO_CS`
-- `CONFIG_ESP_SPI_GPIO_HANDSHAKE`
-- `CONFIG_ESP_SPI_GPIO_DATA_READY`
-- `CONFIG_ESP_SPI_GPIO_RESET`
+| ESP-Hosted signal | RP2350 side | ESP32-C6 side | Schematic net |
+| --- | --- | --- | --- |
+| SCK | GPIO30 | IO22 | `SCK` |
+| MOSI, host to C6 | GPIO31 | IO21 | `MOSI` |
+| MISO, C6 to host | GPIO28 | IO6 through `ESP_MISO` buffer | `MISO` |
+| CS | GPIO46 | IO7 | `ESP_CS` |
+| Handshake/busy | GPIO3 | IO18 | `ESP_BUSY` |
+| Data-ready IRQ | GPIO23 | IO9 / BOOT9 | `I2S_ESP_IRQ` |
+| Reset | GPIO22 | EN | `PERIPH_RST` |
+
+`I2S_ESP_IRQ` is also the ESP32-C6 BOOT9 strap. Keep the RP2350 side as a
+high-impedance input through ESP32-C6 reset/boot; the ESP-Hosted slave firmware
+can drive it as data-ready only after startup.
+
+The matching ESP-Hosted-MCU slave Kconfig overlay is:
+
+- `esp-hosted-mcu/sdkconfig.defaults.fruitjam-esp32c6`
 
 ## ESP32-C6 Firmware Notes
 
@@ -118,30 +130,40 @@ Initial firmware flow:
 ```sh
 git clone --recurse-submodules https://github.com/espressif/esp-hosted-mcu.git
 cd esp-hosted-mcu/slave
-idf.py set-target esp32c6
-idf.py menuconfig
+cp /Users/fred/Documents/FruitClaw/nuttx/boards/arm/rp23xx/adafruit-fruit-jam-rp2350/esp-hosted-mcu/sdkconfig.defaults.fruitjam-esp32c6 .
+. /Users/fred/esp/v5.5.4/esp-idf/export.sh
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.fruitjam-esp32c6" set-target esp32c6
+idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c6;sdkconfig.defaults.fruitjam-esp32c6" build
+idf.py merge-bin
 ```
 
-In menuconfig, choose SPI full-duplex transport and set the ESP32-C6-side pins
-after schematic confirmation. ESP-Hosted full-duplex SPI uses MOSI, MISO, SCK,
-CS, reset, handshake, and data-ready. Start with a low SPI clock such as
+The overlay chooses SPI full-duplex transport, mode 3, and the Fruit Jam
+ESP32-C6 GPIOs listed above. Start the RP2350 host at a low SPI clock such as
 5 MHz and raise it only after error counters and signal behavior are understood.
 
-Build and flash:
+Flash through the RP2350 serial-passthrough UF2:
 
 ```sh
-idf.py build
-idf.py -p <esp32c6_serial_or_bridge_port> flash monitor
+python -m esptool --chip esp32c6 --before no_reset --after no_reset \
+  -p /dev/cu.usbmodem<PASSTHROUGH> -b 115200 \
+  write_flash 0 build/merged-binary.bin
 ```
 
-The exact Fruit Jam ESP32-C6 flashing path still needs to be verified. Do not
-assume the RP2350 USB CDC NSH port can directly flash the ESP32-C6.
+The known local passthrough UF2 is:
+
+```text
+/Users/fred/Documents/Code/PebbleRP2350/hardware_tests/fruitjam_esp32c6_hci/tools/SerialESPPassthrough.ino.uf2
+```
+
+After flashing the ESP32-C6, reflash the RP2350 NuttX UF2 before testing
+`wlan0`.
 
 ## NuttX Configuration Notes
 
 Keep the existing `adafruit-fruit-jam-rp2350:usbnsh` profile stable while the
-driver is scaffold-only. For the experimental ESP-Hosted profile, enable at
-least:
+driver is still being validated. The named
+`adafruit-fruit-jam-rp2350:esp-hosted` profile carries the current experimental
+network configuration. If rebuilding it manually, keep at least:
 
 ```text
 CONFIG_NET=y
@@ -162,12 +184,13 @@ CONFIG_NETDEV_WIRELESS_IOCTL=y
 CONFIG_NETDEV_WIRELESS_HANDLER=y
 CONFIG_DRIVERS_IEEE80211=y
 CONFIG_NETUTILS_DHCPC=y
-CONFIG_NETUTILS_DNSCLIENT=y
+CONFIG_NETDB_DNSCLIENT=y
 CONFIG_SYSTEM_PING=y
 ```
 
-Additional app/service symbols should be added once `wlan0` is real:
-`wapi`, `wget`, `telnetd`, `httpd`, `ftpd`, and socket tests.
+The profile also includes WAPI tooling, DHCP, DNS, `ping`, `wget`, and
+`telnetd` so early link tests can run from NSH. HTTP/FTP servers and broader
+socket tests can be added after basic `wlan0` traffic is proven.
 
 ## Build Evidence
 
@@ -176,14 +199,15 @@ Built locally on 2026-06-29:
 | Profile | Result | FLASH | RAM | Notes |
 | --- | --- | ---: | ---: | --- |
 | `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406576 B | 51060 B | Baseline image after returning from hosted config |
-| Experimental ESP-Hosted network profile | Pass | 457744 B | 66320 B | `CONFIG_ESP_HOSTED_WLAN=y`, WLAN lower-half plus Wi-Fi init/start/connect/scan/AP-record RPCs compiled |
+| `adafruit-fruit-jam-rp2350:esp-hosted` | Pass | 489080 B | 70016 B | Named defconfig with `CONFIG_ESP_HOSTED_WLAN=y`, WAPI, DHCP, DNS, `ping`, `wget`, and `telnetd` compiled |
+| ESP32-C6 ESP-Hosted-MCU slave | Pass | 1026464 B | n/a | Upstream `esp-hosted-mcu` commit `8f0770d39065c2a9ff6828268709c3502e0d5349`, ESP-IDF 5.5.4, Fruit Jam defaults overlay, `merged-binary.bin` SHA256 `a7e78def271dc2a21c6983ce2dd5883b7e95a7c6576fae263edda82c5dceec6c` |
 
 ## Validation Milestones
 
 | ID | Milestone | Current state | Evidence needed |
 | --- | --- | --- | --- |
-| A | ESP32-C6 reset works from RP2350 | Partial | Scope trace or ESP firmware log after NuttX reset callback |
-| B | SPI exchanges valid ESP-Hosted control frames | In progress | Host receives valid ESP-Hosted INIT or RPC response |
+| A | ESP32-C6 reset works from RP2350 | Partial | Schematic maps RP2350 GPIO22/PERIPH_RST to C6 EN; need scope trace or ESP firmware log after NuttX reset callback |
+| B | SPI exchanges valid ESP-Hosted control frames | In progress | Fruit Jam C6 SPI pins are mapped and a slave defaults file exists; host still needs valid ESP-Hosted INIT or RPC response |
 | C | NuttX gets coprocessor version/MAC | In progress | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
 | D | Scan returns AP records | In progress | `WifiScanStart`, `Event_StaScanDone`, `WifiScanGetApRecords`, and WAPI result formatting are implemented; hardware validation still needed |
 | E | Connect and carrier event | In progress | `WifiSetConfig`/`WifiConnect` requests and STA connected/disconnected carrier handling are implemented |
@@ -204,21 +228,11 @@ cd /Users/fred/Documents/FruitClaw/nuttx
 make -j8
 ```
 
-Experimental ESP-Hosted build once the network config is enabled:
+Experimental ESP-Hosted build:
 
 ```sh
 cd /Users/fred/Documents/FruitClaw/nuttx
-./tools/configure.sh -E -m -a ../apps adafruit-fruit-jam-rp2350:usbnsh
-for sym in CONFIG_NET CONFIG_NET_ETHERNET CONFIG_NET_IPv4 CONFIG_NET_TCP \
-  CONFIG_NET_UDP CONFIG_NET_ICMP CONFIG_NET_ARP CONFIG_NETDEVICES \
-  CONFIG_NETDEV_LATEINIT CONFIG_DRIVERS_WIRELESS CONFIG_ESP_HOSTED \
-  CONFIG_ESP_HOSTED_SPI CONFIG_ESP_HOSTED_WLAN \
-  CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED \
-  CONFIG_NETDEV_WIRELESS_IOCTL CONFIG_NETDEV_WIRELESS_HANDLER \
-  CONFIG_DRIVERS_IEEE80211 CONFIG_SCHED_HPWORK CONFIG_SPI_EXCHANGE; do
-  kconfig-tweak --enable "$sym"
-done
-make olddefconfig
+./tools/configure.sh -E -m -a ../apps adafruit-fruit-jam-rp2350:esp-hosted
 make -j8
 ```
 
@@ -244,5 +258,5 @@ wget http://<test-host>/
 4. Verify that received `ESP_STA_IF` payloads are in the exact link-layer
    format expected by the registered NuttX netdev type.
 5. Bring up DHCP, DNS, ping, and TCP/UDP service tests through `wlan0`.
-6. Confirm the ESP32-C6-side SPI/handshake/data-ready/reset pin mapping from
-   the Fruit Jam schematic before publishing slave firmware Kconfig values.
+6. Build and flash the ESP-Hosted-MCU Fruit Jam C6 firmware with the local
+   defaults overlay, then validate the first `ESP_PRIV_EVENT_INIT` handshake.
