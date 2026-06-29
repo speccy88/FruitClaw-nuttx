@@ -39,6 +39,18 @@ data-ready service on `HPWORK`, validates incoming hosted headers and
 checksums, counts private/control/station/AP frames, and recognizes
 `ESP_PRIV_EVENT_INIT`.
 
+After `ESP_PRIV_EVENT_INIT`, the driver now sends two minimal ESP-Hosted RPC
+startup probes over the serial/control interface:
+
+- `Req_GetCoprocessorFwVersion` (`350`) with an empty request payload.
+- `Req_GetMACAddress` (`257`) with station Wi-Fi interface mode `0`.
+
+The parser recognizes `Resp_GetCoprocessorFwVersion` (`606`) and
+`Resp_GetMACAddress` (`513`), records RPC counters, and logs the firmware
+version / IDF target / chip ID and station MAC when the coprocessor returns
+valid responses. This is still control-plane bring-up only; scan, connect, and
+data-plane packet routing are not implemented yet.
+
 It intentionally returns `-ENOSYS` and does not register `wlan0` until
 ESP-Hosted RPC requests/responses and the data path are implemented. That
 keeps the port from exposing a fake network interface before NuttX can really
@@ -144,7 +156,7 @@ Additional app/service symbols should be added once `wlan0` is real:
 | --- | --- | --- | --- |
 | A | ESP32-C6 reset works from RP2350 | Partial | Scope trace or ESP firmware log after NuttX reset callback |
 | B | SPI exchanges valid ESP-Hosted control frames | In progress | Host receives valid ESP-Hosted INIT or RPC response |
-| C | NuttX gets coprocessor version/MAC | Not started | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
+| C | NuttX gets coprocessor version/MAC | In progress | `GetCoprocessorFwVersion` and `GetMacAddress` responses in NuttX log |
 | D | Scan returns AP records | Not started | `wapi scan wlan0` or equivalent returns AP list |
 | E | Connect and carrier event | Not started | Connected event toggles NuttX carrier on |
 | F | `wlan0` appears | Not started | `ifconfig wlan0` shows a registered netdev |

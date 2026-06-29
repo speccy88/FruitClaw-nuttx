@@ -103,6 +103,12 @@ enum esp_hosted_rpc_id_e
   ESP_HOSTED_RPC_WIFI_STA_GET_RSSI         = 341
 };
 
+enum esp_hosted_rpc_response_id_e
+{
+  ESP_HOSTED_RPC_RESP_GET_MAC_ADDRESS           = 513,
+  ESP_HOSTED_RPC_RESP_GET_COPROCESSOR_FWVERSION = 606
+};
+
 begin_packed_struct struct esp_hosted_payload_header_s
 {
   uint8_t  if_type_num;
@@ -139,6 +145,15 @@ struct esp_hosted_stats_s
   uint32_t malformed_frame_count;
   uint32_t checksum_error_count;
   uint32_t control_timeout_count;
+  uint32_t rpc_request_count;
+  uint32_t rpc_response_count;
+  uint32_t rpc_event_count;
+  uint32_t rpc_malformed_count;
+  uint32_t rpc_fwversion_count;
+  uint32_t rpc_mac_count;
+  uint32_t rpc_last_request_id;
+  uint32_t rpc_last_response_id;
+  uint32_t rpc_last_uid;
 };
 
 struct esp_hosted_gpio_ops_s

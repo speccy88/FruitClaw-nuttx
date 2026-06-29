@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -57,17 +58,66 @@
 
 #define ESP_HOSTED_PRIV_EVENT_HDR_LEN    2
 
+#define ESP_HOSTED_RPC_TYPE_REQ          1
+#define ESP_HOSTED_RPC_TYPE_RESP         2
+#define ESP_HOSTED_RPC_TYPE_EVENT        3
+
+#define ESP_HOSTED_PB_WIRE_VARINT        0
+#define ESP_HOSTED_PB_WIRE_64BIT         1
+#define ESP_HOSTED_PB_WIRE_LENGTH        2
+#define ESP_HOSTED_PB_WIRE_32BIT         5
+
+#define ESP_HOSTED_RPC_FIELD_MSG_TYPE    1
+#define ESP_HOSTED_RPC_FIELD_MSG_ID      2
+#define ESP_HOSTED_RPC_FIELD_UID         3
+
+#define ESP_HOSTED_WIFI_IF_STA           0
+#define ESP_HOSTED_RPC_PAYLOAD_MAX       128
+#define ESP_HOSTED_IDF_TARGET_MAX        16
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
+
+struct esp_hosted_rpc_message_s
+{
+  uint32_t msg_type;
+  uint32_t msg_id;
+  uint32_t uid;
+  uint32_t payload_field;
+  FAR const uint8_t *payload;
+  size_t payload_len;
+};
+
+struct esp_hosted_fwversion_s
+{
+  int32_t resp;
+  uint32_t major;
+  uint32_t minor;
+  uint32_t patch;
+  int32_t revision;
+  int32_t prerelease;
+  int32_t build;
+  uint32_t chip_id;
+  char idf_target[ESP_HOSTED_IDF_TARGET_MAX];
+};
 
 struct esp_hosted_driver_s
 {
   struct esp_hosted_config_s config;
   struct esp_hosted_stats_s stats;
   struct work_s rx_work;
+  struct esp_hosted_fwversion_s fwversion;
+  uint32_t rpc_uid;
   volatile bool dataready_seen;
+  bool init_seen;
+  bool startup_probe_pending;
+  bool startup_probe_sent;
+  bool have_mac;
+  bool have_fwversion;
   uint16_t seq_num;
+  uint8_t mac[ESP_HOSTED_MAC_SIZE];
+  uint8_t rpc_payload[ESP_HOSTED_RPC_PAYLOAD_MAX];
   uint8_t tx_frame[ESP_HOSTED_SPI_MAX_FRAME];
   uint8_t rx_frame[ESP_HOSTED_SPI_MAX_FRAME];
 };
@@ -87,6 +137,675 @@ static void esp_hosted_rx_work(FAR void *arg);
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+static int esp_hosted_pb_put_varint(FAR uint8_t *buf, size_t buflen,
+                                    uint64_t value)
+{
+  size_t offset = 0;
+
+  do
+    {
+      uint8_t byte;
+
+      if (offset >= buflen)
+        {
+          return -ENOSPC;
+        }
+
+      byte = value & 0x7f;
+      value >>= 7;
+
+      if (value != 0)
+        {
+          byte |= 0x80;
+        }
+
+      buf[offset++] = byte;
+    }
+  while (value != 0);
+
+  return offset;
+}
+
+static int esp_hosted_pb_append_varint(FAR uint8_t *buf, size_t buflen,
+                                       FAR size_t *offset, uint64_t value)
+{
+  int ret;
+
+  ret = esp_hosted_pb_put_varint(buf + *offset, buflen - *offset, value);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  *offset += ret;
+  return OK;
+}
+
+static int esp_hosted_pb_append_key(FAR uint8_t *buf, size_t buflen,
+                                    FAR size_t *offset, uint32_t field,
+                                    uint8_t wire_type)
+{
+  return esp_hosted_pb_append_varint(buf, buflen, offset,
+                                     ((uint64_t)field << 3) | wire_type);
+}
+
+static int esp_hosted_pb_append_varint_field(FAR uint8_t *buf, size_t buflen,
+                                             FAR size_t *offset,
+                                             uint32_t field, uint64_t value)
+{
+  int ret;
+
+  ret = esp_hosted_pb_append_key(buf, buflen, offset, field,
+                                 ESP_HOSTED_PB_WIRE_VARINT);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  return esp_hosted_pb_append_varint(buf, buflen, offset, value);
+}
+
+static int esp_hosted_pb_append_bytes_field(FAR uint8_t *buf, size_t buflen,
+                                            FAR size_t *offset,
+                                            uint32_t field,
+                                            FAR const uint8_t *value,
+                                            size_t value_len)
+{
+  int ret;
+
+  ret = esp_hosted_pb_append_key(buf, buflen, offset, field,
+                                 ESP_HOSTED_PB_WIRE_LENGTH);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint(buf, buflen, offset, value_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (value_len > buflen - *offset)
+    {
+      return -ENOSPC;
+    }
+
+  if (value_len > 0)
+    {
+      memcpy(buf + *offset, value, value_len);
+      *offset += value_len;
+    }
+
+  return OK;
+}
+
+static int esp_hosted_pb_get_varint(FAR const uint8_t *buf, size_t len,
+                                    FAR size_t *offset,
+                                    FAR uint64_t *value)
+{
+  uint64_t result = 0;
+  unsigned int shift = 0;
+
+  while (*offset < len && shift < 64)
+    {
+      uint8_t byte = buf[(*offset)++];
+
+      result |= ((uint64_t)(byte & 0x7f)) << shift;
+      if ((byte & 0x80) == 0)
+        {
+          *value = result;
+          return OK;
+        }
+
+      shift += 7;
+    }
+
+  return -EINVAL;
+}
+
+static int esp_hosted_pb_skip_field(FAR const uint8_t *buf, size_t len,
+                                    FAR size_t *offset, uint8_t wire_type)
+{
+  uint64_t value;
+  int ret;
+
+  switch (wire_type)
+    {
+      case ESP_HOSTED_PB_WIRE_VARINT:
+        return esp_hosted_pb_get_varint(buf, len, offset, &value);
+
+      case ESP_HOSTED_PB_WIRE_64BIT:
+        if (len - *offset < 8)
+          {
+            return -EINVAL;
+          }
+
+        *offset += 8;
+        return OK;
+
+      case ESP_HOSTED_PB_WIRE_LENGTH:
+        ret = esp_hosted_pb_get_varint(buf, len, offset, &value);
+        if (ret < 0 || value > len - *offset)
+          {
+            return -EINVAL;
+          }
+
+        *offset += value;
+        return OK;
+
+      case ESP_HOSTED_PB_WIRE_32BIT:
+        if (len - *offset < 4)
+          {
+            return -EINVAL;
+          }
+
+        *offset += 4;
+        return OK;
+
+      default:
+        return -EINVAL;
+    }
+}
+
+static int32_t esp_hosted_pb_int32(uint64_t value)
+{
+  return (int32_t)(uint32_t)value;
+}
+
+static uint32_t esp_hosted_next_rpc_uid(FAR struct esp_hosted_driver_s *priv)
+{
+  priv->rpc_uid++;
+  if (priv->rpc_uid == 0)
+    {
+      priv->rpc_uid++;
+    }
+
+  return priv->rpc_uid;
+}
+
+static int esp_hosted_parse_rpc_message(FAR const uint8_t *payload,
+                                        uint16_t len,
+                                        FAR struct esp_hosted_rpc_message_s
+                                        *msg)
+{
+  size_t offset = 0;
+  int ret;
+
+  memset(msg, 0, sizeof(*msg));
+
+  while (offset < len)
+    {
+      uint64_t key;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      switch (field)
+        {
+          case ESP_HOSTED_RPC_FIELD_MSG_TYPE:
+          case ESP_HOSTED_RPC_FIELD_MSG_ID:
+          case ESP_HOSTED_RPC_FIELD_UID:
+            {
+              uint64_t value;
+
+              if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+                {
+                  return -EINVAL;
+                }
+
+              ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+              if (ret < 0)
+                {
+                  return ret;
+                }
+
+              if (field == ESP_HOSTED_RPC_FIELD_MSG_TYPE)
+                {
+                  msg->msg_type = value;
+                }
+              else if (field == ESP_HOSTED_RPC_FIELD_MSG_ID)
+                {
+                  msg->msg_id = value;
+                }
+              else
+                {
+                  msg->uid = value;
+                }
+            }
+            break;
+
+          default:
+            if (wire_type == ESP_HOSTED_PB_WIRE_LENGTH && field >= 256)
+              {
+                uint64_t value_len;
+
+                ret = esp_hosted_pb_get_varint(payload, len, &offset,
+                                               &value_len);
+                if (ret < 0 || value_len > len - offset)
+                  {
+                    return -EINVAL;
+                  }
+
+                msg->payload_field = field;
+                msg->payload = payload + offset;
+                msg->payload_len = value_len;
+                offset += value_len;
+            }
+            else
+              {
+                ret = esp_hosted_pb_skip_field(payload, len, &offset,
+                                               wire_type);
+                if (ret < 0)
+                  {
+                    return ret;
+                  }
+              }
+            break;
+        }
+    }
+
+  return OK;
+}
+
+static int esp_hosted_parse_mac_response(FAR struct esp_hosted_driver_s *priv,
+                                         FAR const uint8_t *payload,
+                                         size_t len)
+{
+  size_t offset = 0;
+  int32_t resp = 0;
+  bool have_mac = false;
+  uint8_t mac[ESP_HOSTED_MAC_SIZE];
+  int ret;
+
+  memset(mac, 0, sizeof(mac));
+
+  while (offset < len)
+    {
+      uint64_t key;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      switch (field)
+        {
+          case 1:
+            {
+              uint64_t value_len;
+
+              if (wire_type != ESP_HOSTED_PB_WIRE_LENGTH)
+                {
+                  return -EINVAL;
+                }
+
+              ret = esp_hosted_pb_get_varint(payload, len, &offset,
+                                             &value_len);
+              if (ret < 0 || value_len > len - offset ||
+                  value_len < ESP_HOSTED_MAC_SIZE)
+                {
+                  return -EINVAL;
+                }
+
+              memcpy(mac, payload + offset, ESP_HOSTED_MAC_SIZE);
+              offset += value_len;
+              have_mac = true;
+            }
+            break;
+
+          case 2:
+            {
+              uint64_t value;
+
+              if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+                {
+                  return -EINVAL;
+                }
+
+              ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+              if (ret < 0)
+                {
+                  return ret;
+                }
+
+              resp = esp_hosted_pb_int32(value);
+            }
+            break;
+
+          default:
+            ret = esp_hosted_pb_skip_field(payload, len, &offset, wire_type);
+            if (ret < 0)
+              {
+                return ret;
+              }
+            break;
+        }
+    }
+
+  if (!have_mac)
+    {
+      return -EINVAL;
+    }
+
+  memcpy(priv->mac, mac, sizeof(priv->mac));
+  priv->have_mac = true;
+  priv->stats.rpc_mac_count++;
+
+  ninfo("ESP-Hosted STA MAC: %02x:%02x:%02x:%02x:%02x:%02x resp=%" PRId32
+        "\n",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], resp);
+
+  return OK;
+}
+
+static int esp_hosted_parse_fwversion_response(
+  FAR struct esp_hosted_driver_s *priv, FAR const uint8_t *payload,
+  size_t len)
+{
+  struct esp_hosted_fwversion_s version;
+  size_t offset = 0;
+  int ret;
+
+  memset(&version, 0, sizeof(version));
+  version.revision = -1;
+  version.prerelease = -1;
+  version.build = -1;
+
+  while (offset < len)
+    {
+      uint64_t key;
+      uint32_t field;
+      uint8_t wire_type;
+
+      ret = esp_hosted_pb_get_varint(payload, len, &offset, &key);
+      if (ret < 0 || key == 0)
+        {
+          return -EINVAL;
+        }
+
+      field = key >> 3;
+      wire_type = key & 0x07;
+
+      switch (field)
+        {
+          case 1:
+          case 5:
+          case 6:
+          case 7:
+            {
+              uint64_t value;
+
+              if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+                {
+                  return -EINVAL;
+                }
+
+              ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+              if (ret < 0)
+                {
+                  return ret;
+                }
+
+              if (field == 1)
+                {
+                  version.resp = esp_hosted_pb_int32(value);
+                }
+              else if (field == 5 && value != 0)
+                {
+                  version.revision = esp_hosted_pb_int32(value);
+                }
+              else if (field == 6 && value != 0)
+                {
+                  version.prerelease = esp_hosted_pb_int32(value);
+                }
+              else if (field == 7 && value != 0)
+                {
+                  version.build = esp_hosted_pb_int32(value);
+                }
+            }
+            break;
+
+          case 2:
+          case 3:
+          case 4:
+          case 8:
+            {
+              uint64_t value;
+
+              if (wire_type != ESP_HOSTED_PB_WIRE_VARINT)
+                {
+                  return -EINVAL;
+                }
+
+              ret = esp_hosted_pb_get_varint(payload, len, &offset, &value);
+              if (ret < 0)
+                {
+                  return ret;
+                }
+
+              if (field == 2)
+                {
+                  version.major = value;
+                }
+              else if (field == 3)
+                {
+                  version.minor = value;
+                }
+              else if (field == 4)
+                {
+                  version.patch = value;
+                }
+              else
+                {
+                  version.chip_id = value;
+                }
+            }
+            break;
+
+          case 9:
+            {
+              uint64_t value_len;
+              size_t copy_len;
+
+              if (wire_type != ESP_HOSTED_PB_WIRE_LENGTH)
+                {
+                  return -EINVAL;
+                }
+
+              ret = esp_hosted_pb_get_varint(payload, len, &offset,
+                                             &value_len);
+              if (ret < 0 || value_len > len - offset)
+                {
+                  return -EINVAL;
+                }
+
+              copy_len = value_len;
+              if (copy_len >= sizeof(version.idf_target))
+                {
+                  copy_len = sizeof(version.idf_target) - 1;
+                }
+
+              if (copy_len > 0)
+                {
+                  memcpy(version.idf_target, payload + offset, copy_len);
+                  version.idf_target[copy_len] = '\0';
+                }
+
+              offset += value_len;
+            }
+            break;
+
+          default:
+            ret = esp_hosted_pb_skip_field(payload, len, &offset, wire_type);
+            if (ret < 0)
+              {
+                return ret;
+              }
+            break;
+        }
+    }
+
+  priv->fwversion = version;
+  priv->have_fwversion = true;
+  priv->stats.rpc_fwversion_count++;
+
+  ninfo("ESP-Hosted firmware: %" PRIu32 ".%" PRIu32 ".%" PRIu32
+        " target=%s chip=%" PRIu32 " resp=%" PRId32 "\n",
+        version.major, version.minor, version.patch, version.idf_target,
+        version.chip_id, version.resp);
+
+  return OK;
+}
+
+static int esp_hosted_parse_control_frame(FAR struct esp_hosted_driver_s *priv,
+                                          FAR const uint8_t *payload,
+                                          uint16_t len)
+{
+  struct esp_hosted_rpc_message_s msg;
+  int ret;
+
+  ret = esp_hosted_parse_rpc_message(payload, len, &msg);
+  if (ret < 0)
+    {
+      priv->stats.rpc_malformed_count++;
+      return ret;
+    }
+
+  priv->stats.rpc_last_uid = msg.uid;
+
+  if (msg.msg_type == ESP_HOSTED_RPC_TYPE_RESP)
+    {
+      priv->stats.rpc_response_count++;
+      priv->stats.rpc_last_response_id = msg.msg_id;
+
+      if (msg.payload_field != msg.msg_id)
+        {
+          priv->stats.rpc_malformed_count++;
+          nwarn("ESP-Hosted RPC response payload mismatch: id=%" PRIu32
+                " payload=%" PRIu32 "\n",
+                msg.msg_id, msg.payload_field);
+          return -EINVAL;
+        }
+
+      switch (msg.msg_id)
+        {
+          case ESP_HOSTED_RPC_RESP_GET_MAC_ADDRESS:
+            return esp_hosted_parse_mac_response(priv, msg.payload,
+                                                 msg.payload_len);
+
+          case ESP_HOSTED_RPC_RESP_GET_COPROCESSOR_FWVERSION:
+            return esp_hosted_parse_fwversion_response(priv, msg.payload,
+                                                       msg.payload_len);
+
+          default:
+            ninfo("ESP-Hosted RPC response: id=%" PRIu32 " uid=%" PRIu32
+                  " len=%zu\n",
+                  msg.msg_id, msg.uid, msg.payload_len);
+            return OK;
+        }
+    }
+  else if (msg.msg_type == ESP_HOSTED_RPC_TYPE_EVENT)
+    {
+      priv->stats.rpc_event_count++;
+      ninfo("ESP-Hosted RPC event: id=%" PRIu32 " uid=%" PRIu32
+            " len=%zu\n",
+            msg.msg_id, msg.uid, msg.payload_len);
+      return OK;
+    }
+
+  priv->stats.rpc_malformed_count++;
+  nwarn("ESP-Hosted unexpected RPC message: type=%" PRIu32 " id=%" PRIu32
+        " uid=%" PRIu32 "\n",
+        msg.msg_type, msg.msg_id, msg.uid);
+
+  return -EINVAL;
+}
+
+static int esp_hosted_build_rpc_request(FAR struct esp_hosted_driver_s *priv,
+                                        uint32_t request_id,
+                                        FAR uint8_t *payload,
+                                        size_t payload_size,
+                                        FAR size_t *payload_len)
+{
+  uint8_t request_payload[16];
+  size_t request_len = 0;
+  size_t offset = 0;
+  uint32_t uid;
+  int ret;
+
+  switch (request_id)
+    {
+      case ESP_HOSTED_RPC_GET_MAC_ADDRESS:
+        ret = esp_hosted_pb_append_varint_field(request_payload,
+                                                sizeof(request_payload),
+                                                &request_len, 1,
+                                                ESP_HOSTED_WIFI_IF_STA);
+        if (ret < 0)
+          {
+            return ret;
+          }
+        break;
+
+      case ESP_HOSTED_RPC_GET_COPROCESSOR_FWVERSION:
+        break;
+
+      default:
+        return -EINVAL;
+    }
+
+  uid = esp_hosted_next_rpc_uid(priv);
+
+  ret = esp_hosted_pb_append_varint_field(payload, payload_size, &offset,
+                                          ESP_HOSTED_RPC_FIELD_MSG_TYPE,
+                                          ESP_HOSTED_RPC_TYPE_REQ);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(payload, payload_size, &offset,
+                                          ESP_HOSTED_RPC_FIELD_MSG_ID,
+                                          request_id);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_varint_field(payload, payload_size, &offset,
+                                          ESP_HOSTED_RPC_FIELD_UID, uid);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  ret = esp_hosted_pb_append_bytes_field(payload, payload_size, &offset,
+                                         request_id, request_payload,
+                                         request_len);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  *payload_len = offset;
+  priv->stats.rpc_last_uid = uid;
+  return OK;
+}
 
 static uint16_t esp_hosted_checksum(FAR const uint8_t *buf, uint16_t len)
 {
@@ -179,6 +898,12 @@ static int esp_hosted_parse_priv_frame(FAR struct esp_hosted_driver_s *priv,
   if (event_type == ESP_HOSTED_PRIV_EVENT_INIT)
     {
       priv->stats.rx_init_event_count++;
+      priv->init_seen = true;
+      if (!priv->startup_probe_sent)
+        {
+          priv->startup_probe_pending = true;
+        }
+
       ninfo("ESP-Hosted INIT event received: len=%u\n", event_len);
     }
   else
@@ -247,6 +972,11 @@ static int esp_hosted_parse_rx_frame(FAR struct esp_hosted_driver_s *priv,
 
       case ESP_HOSTED_SERIAL_IF:
         priv->stats.rx_control_count++;
+        ret = esp_hosted_parse_control_frame(priv, payload, len);
+        if (ret < 0)
+          {
+            priv->stats.malformed_frame_count++;
+          }
         break;
 
       case ESP_HOSTED_PRIV_IF:
@@ -375,6 +1105,67 @@ static int esp_hosted_spi_exchange_frame(FAR struct esp_hosted_driver_s *priv,
   return OK;
 }
 
+static int esp_hosted_send_rpc_request(FAR struct esp_hosted_driver_s *priv,
+                                       uint32_t request_id)
+{
+  size_t payload_len;
+  int ret;
+
+  ret = esp_hosted_build_rpc_request(priv, request_id, priv->rpc_payload,
+                                     sizeof(priv->rpc_payload),
+                                     &payload_len);
+  if (ret < 0)
+    {
+      priv->stats.rpc_malformed_count++;
+      return ret;
+    }
+
+  esp_hosted_build_header(priv, priv->tx_frame, ESP_HOSTED_SERIAL_IF, 0, 0,
+                          priv->rpc_payload, payload_len);
+  memset(priv->rx_frame, 0, sizeof(priv->rx_frame));
+
+  ret = esp_hosted_spi_exchange_frame(priv, priv->tx_frame, priv->rx_frame);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  priv->stats.rpc_request_count++;
+  priv->stats.rpc_last_request_id = request_id;
+
+  ninfo("ESP-Hosted RPC request: id=%" PRIu32 " uid=%" PRIu32
+        " len=%zu\n",
+        request_id, priv->stats.rpc_last_uid, payload_len);
+
+  return esp_hosted_parse_rx_frame(priv, priv->rx_frame);
+}
+
+static void esp_hosted_run_startup_probe(FAR struct esp_hosted_driver_s *priv)
+{
+  int ret;
+
+  if (!priv->startup_probe_pending || priv->startup_probe_sent)
+    {
+      return;
+    }
+
+  priv->startup_probe_pending = false;
+  priv->startup_probe_sent = true;
+
+  ret = esp_hosted_send_rpc_request(priv,
+                                    ESP_HOSTED_RPC_GET_COPROCESSOR_FWVERSION);
+  if (ret < 0)
+    {
+      nwarn("ESP-Hosted firmware-version RPC failed: %d\n", ret);
+    }
+
+  ret = esp_hosted_send_rpc_request(priv, ESP_HOSTED_RPC_GET_MAC_ADDRESS);
+  if (ret < 0)
+    {
+      nwarn("ESP-Hosted MAC RPC failed: %d\n", ret);
+    }
+}
+
 static int esp_hosted_exchange_dummy(FAR struct esp_hosted_driver_s *priv)
 {
   int ret;
@@ -391,9 +1182,8 @@ static int esp_hosted_exchange_dummy(FAR struct esp_hosted_driver_s *priv)
   return esp_hosted_parse_rx_frame(priv, priv->rx_frame);
 }
 
-static void esp_hosted_rx_work(FAR void *arg)
+static void esp_hosted_drain_rx(FAR struct esp_hosted_driver_s *priv)
 {
-  FAR struct esp_hosted_driver_s *priv = arg;
   unsigned int i;
   int ret;
 
@@ -414,6 +1204,15 @@ static void esp_hosted_rx_work(FAR void *arg)
           break;
         }
     }
+}
+
+static void esp_hosted_rx_work(FAR void *arg)
+{
+  FAR struct esp_hosted_driver_s *priv = arg;
+
+  esp_hosted_drain_rx(priv);
+  esp_hosted_run_startup_probe(priv);
+  esp_hosted_drain_rx(priv);
 }
 
 static int esp_hosted_attach_irq(FAR struct esp_hosted_driver_s *priv)
@@ -471,6 +1270,10 @@ static void esp_hosted_prime_transport(FAR struct esp_hosted_driver_s *priv)
   if (priv->config.gpio->data_ready(priv->config.gpio_arg))
     {
       priv->dataready_seen = true;
+      esp_hosted_schedule_rx_work(priv);
+    }
+  else if (priv->startup_probe_pending)
+    {
       esp_hosted_schedule_rx_work(priv);
     }
 }
