@@ -13,7 +13,7 @@ firmware path.
 - ESP32-C6 handles Wi-Fi radio work and exchanges control/data frames with the
   RP2350 host.
 - User-space sees normal NuttX networking: `ifconfig wlan0`, WAPI/wireless
-  ioctls, DHCP, DNS, ping, TCP/UDP sockets, telnet, HTTP, and FTP.
+  ioctls, DHCP, DNS, ping, TCP/UDP sockets, telnet, HTTP, FTP, MQTT, and NTP.
 
 ## Current Code State
 
@@ -77,7 +77,8 @@ notifications from the coprocessor.
 As of the 2026-06-29 hardware run, this path is no longer just a scaffold:
 Fruit Jam boots the ESP-Hosted profile, registers `wlan0`, scans, associates,
 gets DHCP/DNS, passes ICMP, makes TCP client connections, accepts inbound
-telnet, and recovers after an explicit WAPI disconnect/reconnect cycle.
+telnet/HTTP/FTP, publishes MQTT, syncs NTP, and recovers after an explicit
+WAPI disconnect/reconnect cycle.
 
 ## RP2350-Side Pins
 
@@ -194,11 +195,23 @@ CONFIG_DRIVERS_IEEE80211=y
 CONFIG_NETUTILS_DHCPC=y
 CONFIG_NETDB_DNSCLIENT=y
 CONFIG_SYSTEM_PING=y
+CONFIG_NETUTILS_WEBCLIENT=y
+CONFIG_EXAMPLES_WGET=y
+CONFIG_NETUTILS_WEBSERVER=y
+CONFIG_NETUTILS_HTTPD_SINGLECONNECT=y
+CONFIG_EXAMPLES_WEBSERVER=y
+CONFIG_NETUTILS_FTPD=y
+CONFIG_EXAMPLES_FTPD=y
+CONFIG_NETUTILS_MQTTC=y
+CONFIG_EXAMPLES_MQTTC=y
+CONFIG_NETUTILS_NTPCLIENT=y
+CONFIG_SYSTEM_NTPC=y
+CONFIG_SYSTEM_VI=y
 ```
 
-The profile also includes WAPI tooling, DHCP, DNS, `ping`, `wget`, and
-`telnetd` so early link tests can run from NSH. HTTP/FTP servers and broader
-socket tests can be added after basic `wlan0` traffic is proven.
+The profile also includes WAPI tooling, DHCP, DNS, `ping`, `wget`, `telnetd`,
+`webserver`, `ftpd_start`/`ftpd_stop`, `mqttc_pub`, `ntpcstart`/`ntpcstatus`/
+`ntpcstop`, and `vi` so link and service tests can run from NSH.
 
 The ARP retry window is intentionally longer than the NuttX default. With the
 default 5 tries at 20 ms, a first same-LAN TCP connection could fail with
@@ -212,7 +225,7 @@ Built locally on 2026-06-29:
 | Profile | Result | FLASH | RAM | Notes |
 | --- | --- | ---: | ---: | --- |
 | `adafruit-fruit-jam-rp2350:usbnsh` | Pass | 406576 B | 51060 B | Baseline image after returning from hosted config |
-| `adafruit-fruit-jam-rp2350:esp-hosted` | Pass | 496124 B | 70944 B | Named defconfig with `CONFIG_ESP_HOSTED_WLAN=y`, WAPI, DHCP, DNS, ICMP sockets, ARP retry tuning, `wget`, and `telnetd` compiled |
+| `adafruit-fruit-jam-rp2350:esp-hosted` | Pass | 530896 B | 72208 B | Named defconfig with `CONFIG_ESP_HOSTED_WLAN=y`, WAPI, DHCP, DNS, ICMP sockets, ARP retry tuning, `wget`, `telnetd`, `webserver`, `ftpd_start`, `mqttc_pub`, `ntpc*`, and `vi` compiled |
 | ESP32-C6 ESP-Hosted-MCU slave | Pass | 1026464 B | n/a | Upstream `esp-hosted-mcu` commit `8f0770d39065c2a9ff6828268709c3502e0d5349`, ESP-IDF 5.5.4, Fruit Jam defaults overlay, `merged-binary.bin` SHA256 `a7e78def271dc2a21c6983ce2dd5883b7e95a7c6576fae263edda82c5dceec6c` |
 
 ## Validation Milestones
@@ -234,6 +247,19 @@ Built locally on 2026-06-29:
 The same flashed image also passed a USB CDC / NSH editing smoke test:
 up-arrow history recall re-ran the previous command, and left-arrow insertion
 produced `echo abcXYZdef` without hanging the shell.
+
+## Network App Validation
+
+Validated on the 2026-06-29 flashed ESP-Hosted image:
+
+| App/service | Result | Evidence |
+| --- | --- | --- |
+| Webclient / `wget` | Pass | `wget http://example.com/` returned the Example Domain HTML through `wlan0` |
+| Webserver | Pass | `webserver &` started the embedded sample site; a Mac host HTTP GET to `http://192.168.1.7/` returned HTTP 200 and the sample page |
+| FTPD | Pass | `ftpd_start -4` started `NuttX FTP Server`; a Mac host logged in as `root`, listed `/`, uploaded `/tmp/fruitclaw-ftp.txt`, and read it back |
+| MQTT-C example | Pass | `mqttc_pub -h 192.168.1.234 -p 1883 -t fruitclaw/test -m fruitclaw -n 1` connected to a local test broker and published the message |
+| NTP client | Pass | `ntpcstart` launched the daemon; after the retry/sample window, `ntpcstatus` reported 5 samples from pool servers; `ntpcstop` stopped it |
+| vi | Pass | `vi -h` printed usage with the configured 80x24 defaults |
 
 ## Bring-Up Commands
 
@@ -267,6 +293,13 @@ ping -c 1 -I wlan0 example.com
 wget http://<same-lan-test-host>:18080/
 wget http://example.com/
 telnetd
+webserver &
+ftpd_start -4
+mqttc_pub -h <mqtt-broker-ip> -p 1883 -t fruitclaw/test -m fruitclaw -n 1
+ntpcstart
+ntpcstatus
+ntpcstop
+vi -h
 wapi disconnect wlan0
 wapi psk wlan0 <passphrase> 3 2
 wapi essid wlan0 <ssid> 1
