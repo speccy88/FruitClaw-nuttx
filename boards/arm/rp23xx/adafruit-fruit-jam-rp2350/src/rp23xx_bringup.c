@@ -33,11 +33,17 @@
 
 #include <nuttx/clock.h>
 #include <nuttx/fs/fs.h>
+#include <nuttx/usb/usbhost.h>
 #include <nuttx/wqueue.h>
 
 #include <arch/board/board.h>
 
 #include "rp23xx_pico.h"
+
+#if defined(CONFIG_RP23XX_PIO_USBHOST) && \
+    defined(CONFIG_RP23XX_PIO_USBHOST_AUTOSTART)
+#  include "rp23xx_pio_usbhost.h"
+#endif
 
 #ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_ESP_HOSTED_AUTOSTART
 #  include <nuttx/wireless/esp_hosted.h>
@@ -238,6 +244,26 @@ int rp23xx_bringup(uintptr_t arg)
 #endif /* CONFIG_ARCH_BOARD_COMMON */
 
   /* --- Place any board specific bringup code here --- */
+
+#if defined(CONFIG_RP23XX_PIO_USBHOST) && \
+    defined(CONFIG_RP23XX_PIO_USBHOST_AUTOSTART)
+  FAR struct usbhost_connection_s *usbhost_conn;
+
+  ret = rp23xx_pio_usbhost_initialize(&usbhost_conn);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: PIO USB host initialize failed: %d\n", ret);
+    }
+  else
+    {
+      ret = usbhost_waiter_initialize(usbhost_conn);
+      if (ret < 0)
+        {
+          syslog(LOG_ERR, "ERROR: usbhost_waiter_initialize failed: %d\n",
+                 ret);
+        }
+    }
+#endif
 
 #ifdef CONFIG_RP23XX_I2S
   ret = fruitjam_audio_codec_initialize();

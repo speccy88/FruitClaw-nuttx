@@ -1,5 +1,5 @@
 /****************************************************************************
- * boards/arm/rp23xx/adafruit-fruit-jam-rp2350/src/etc/init.d/rcS
+ * arch/arm/src/rp23xx/rp23xx_pio_usbhost.h
  *
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -20,11 +20,13 @@
  *
  ****************************************************************************/
 
-#include <nuttx/config.h>
+#ifndef __ARCH_ARM_SRC_RP23XX_RP23XX_PIO_USBHOST_H
+#define __ARCH_ARM_SRC_RP23XX_RP23XX_PIO_USBHOST_H
 
-#if defined(CONFIG_SYSTEM_PIOUSBHOST) && \
-    defined(CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD)
-piousbhost start-guarded
-#elif defined(CONFIG_SYSTEM_PIOUSBHOST)
-piousbhost start
-#endif
+/****************************************************************************
+ * Included Files
+ ****************************************************************************/
+
+#include <nuttx/usb/rp23xx_pio_usbhost.h>
+
+#endif /* __ARCH_ARM_SRC_RP23XX_RP23XX_PIO_USBHOST_H */

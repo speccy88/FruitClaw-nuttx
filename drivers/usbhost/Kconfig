@@ -62,6 +62,16 @@ config USBHOST_CONFIGURATION_SELECTION
 		choose by VID/PID or any other info it can acquire from a USB descriptor.
 		Board file must supply board_usbhost_select_configuration().
 
+config USBHOST_SETADDRESS_AFTER_8BYTE_DEVDESC
+	bool "Set address after the first 8 device descriptor bytes"
+	default n
+	---help---
+		Use a TinyUSB-style enumeration sequence: read only the first 8 bytes
+		of the device descriptor at address zero, set the device address, then
+		read the full device descriptor at the assigned address.  This can help
+		devices or soft host controllers that do not tolerate a full device
+		descriptor request before SET_ADDRESS.
+
 config USBHOST_WAITER
 	bool "USB Host Waiter Support"
 	default n
@@ -379,6 +389,34 @@ config HIDKBD_NPOLLWAITERS
 	---help---
 		If the poll() method is enabled, this defines the maximum number
 		of threads that can be waiting for keyboard events.  Default: 2.
+
+config HIDKBD_INPUT
+	bool "Expose HID keyboard through input keyboard API"
+	default n
+	select INPUT
+	select INPUT_KEYBOARD
+	---help---
+		Register each USB HID boot keyboard through the generic keyboard
+		input upper-half in addition to the legacy /dev/kbd[a-z] HID
+		character stream.
+
+config HIDKBD_INPUT_DEVPATH
+	string "Input keyboard device path"
+	default "/dev/kbd0"
+	depends on HIDKBD_INPUT
+	---help---
+		Device node used for the input keyboard event interface. The
+		device emits struct keyboard_event_s records.
+
+config HIDKBD_INPUT_DOSKEYS
+	bool "Use DOS-style event key codes"
+	default n
+	depends on HIDKBD_INPUT
+	---help---
+		Emit key codes that match the classic DOS/DOOM keyboard values
+		for navigation keys, function keys, and Ctrl/Alt/Shift. Printable
+		keys are still emitted as unshifted ASCII. This is useful for
+		applications such as NXDoom that expect Chocolate Doom key codes.
 
 config HIDKBD_RAWSCANCODES
 	bool "Use Raw Scan Codes"

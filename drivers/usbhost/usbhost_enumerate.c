@@ -396,8 +396,13 @@ int usbhost_enumerate(FAR struct usbhost_hubport_s *hport,
   DRVR_EP0CONFIGURE(hport->drvr, hport->ep0, 0, hport->speed,
                     maxpacketsize);
 
-  /* Now read the full device descriptor (if we have not already done so) */
+  /* Now read the full device descriptor (if we have not already done so).
+   * Some soft-host paths prefer the TinyUSB sequence: read 8 bytes at
+   * address zero, SET_ADDRESS, then read the full descriptor at the assigned
+   * address.
+   */
 
+#ifndef CONFIG_USBHOST_SETADDRESS_AFTER_8BYTE_DEVDESC
   if (descsize < USB_SIZEOF_DEVDESC)
     {
       ctrlreq->type = USB_REQ_DIR_IN | USB_REQ_RECIPIENT_DEVICE;
@@ -422,6 +427,7 @@ int usbhost_enumerate(FAR struct usbhost_hubport_s *hport,
    */
 
   usbhost_devdesc((struct usb_devdesc_s *)buffer, &id);
+#endif
 
   /* Assign a function address to the device connected to this port */
 
@@ -458,6 +464,29 @@ int usbhost_enumerate(FAR struct usbhost_hubport_s *hport,
 
   DRVR_EP0CONFIGURE(hport->drvr, hport->ep0, hport->funcaddr,
                     hport->speed, maxpacketsize);
+
+  /* If requested, follow the TinyUSB-style sequence by reading the full
+   * descriptor only after SET_ADDRESS.  The default path already read the full
+   * descriptor at address zero and can go straight to configuration probing.
+   */
+
+#ifdef CONFIG_USBHOST_SETADDRESS_AFTER_8BYTE_DEVDESC
+  ctrlreq->type = USB_REQ_DIR_IN | USB_REQ_RECIPIENT_DEVICE;
+  ctrlreq->req  = USB_REQ_GETDESCRIPTOR;
+  usbhost_putle16(ctrlreq->value, (USB_DESC_TYPE_DEVICE << 8));
+  usbhost_putle16(ctrlreq->index, 0);
+  usbhost_putle16(ctrlreq->len, USB_SIZEOF_DEVDESC);
+
+  ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq, buffer);
+  if (ret < 0)
+    {
+      uerr("ERROR: Failed to refresh device descriptor after address, "
+           "length=%d: %d\n", USB_SIZEOF_DEVDESC, ret);
+      goto errout;
+    }
+
+  usbhost_devdesc((struct usb_devdesc_s *)buffer, &id);
+#endif
 
 #ifdef CONFIG_USBHOST_CONFIGURATION_SELECTION
   /* Board specific callback to choose which configuration to use for
@@ -541,31 +570,47 @@ int usbhost_enumerate(FAR struct usbhost_hubport_s *hport,
 
   if (id.base == USB_CLASS_PER_INTERFACE)
     {
+#ifdef CONFIG_USBHOST_COMPOSITE
+      /* A device that reports its class per interface may still be a
+       * composite device.  Try the composite wrapper first so each interface
+       * can bind to its own class driver.
+       */
+
+      ret = usbhost_composite(hport, buffer, cfglen, &id, devclass);
+      if (ret >= 0)
+        {
+          uinfo("usbhost_composite has bound the composite device\n");
+        }
+      else
+#endif
+        {
       /* Get the class identification information for this device from the
        * interface descriptor(s).  Hmmm.. More logic is need to handle the
        * case of multiple interface descriptors.
        */
 
-      uint8_t ninterfaces = ((struct usb_cfgdesc_s *)buffer)->ninterfaces;
-      uint8_t ifnum = 0;
+          uint8_t ninterfaces =
+            ((struct usb_cfgdesc_s *)buffer)->ninterfaces;
+          uint8_t ifnum = 0;
 
-      for (ifnum = 0; ifnum < ninterfaces; ifnum++)
-        {
-          uinfo("Parsing interface: %d\n", ifnum);
-          ret = usbhost_configdesc(buffer, cfglen, ifnum, &ifnum, &id);
-          if (ret < 0)
+          for (ifnum = 0; ifnum < ninterfaces; ifnum++)
             {
-              uerr("ERROR: usbhost_configdesc failed: %d\n", ret);
-              goto errout;
-            }
+              uinfo("Parsing interface: %d\n", ifnum);
+              ret = usbhost_configdesc(buffer, cfglen, ifnum, &ifnum, &id);
+              if (ret < 0)
+                {
+                  uerr("ERROR: usbhost_configdesc failed: %d\n", ret);
+                  goto errout;
+                }
 
-          ret = usbhost_classbind(hport, buffer, cfglen, &id, devclass);
-          if (ret < 0)
-            {
-              uerr("ERROR: usbhost_classbind failed %d\n", ret);
-            }
+              ret = usbhost_classbind(hport, buffer, cfglen, &id, devclass);
+              if (ret < 0)
+                {
+                  uerr("ERROR: usbhost_classbind failed %d\n", ret);
+                }
 
-          ret = OK;
+              ret = OK;
+            }
         }
     }
   else

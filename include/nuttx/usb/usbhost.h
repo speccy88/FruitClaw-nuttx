@@ -1026,6 +1026,20 @@ FAR const struct usbhost_registry_s *
  ****************************************************************************/
 
 int usbhost_hub_initialize(void);
+
+/****************************************************************************
+ * Name: usbhost_hub_rescan
+ *
+ * Description:
+ *   Force live USB hub instances to poll downstream port status.
+ *
+ * Returned Value:
+ *   A positive number of queued scans, zero if a scan was already
+ *   pending/running, or a negated errno value on failure.
+ *
+ ****************************************************************************/
+
+int usbhost_hub_rescan(void);
 #endif
 
 #ifdef CONFIG_USBHOST_MSC

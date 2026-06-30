@@ -775,6 +775,200 @@ config RP23XX_I2S_PIO_SM
 endif # RP23XX_I2S
 
 #####################################################################
+#  PIO USB Host Configuration
+#####################################################################
+
+config RP23XX_PIO_USBHOST
+	bool "PIO USB host controller"
+	depends on USBHOST
+	depends on RP23XX_DMAC
+	select USBHOST_HAVE_ASYNCH
+	---help---
+		Enable a low/full-speed USB host controller implemented with
+		RP23XX PIO and one DMA channel. This is intended for boards such
+		as the Adafruit Fruit Jam that expose a PIO-USB host port.
+
+if RP23XX_PIO_USBHOST
+
+config RP23XX_PIO_USBHOST_AUTOSTART
+	bool "Start PIO USB host during board bring-up"
+	default n
+	---help---
+		Start the PIO USB host controller and USB host waiter from board
+		bring-up. Leave this disabled during bring-up so CDC/NSH can come
+		up first, then start the host explicitly with piousbhost.
+
+config RP23XX_PIO_USBHOST_DP_GPIO
+	int "PIO USB host D+ GPIO"
+	default 1
+	range 0 47
+
+config RP23XX_PIO_USBHOST_DM_GPIO
+	int "PIO USB host D- GPIO"
+	default 2
+	range 0 47
+
+config RP23XX_PIO_USBHOST_VBUS_GPIO
+	int "PIO USB host VBUS enable GPIO"
+	default -1
+	range -1 47
+	---help---
+		Set to -1 if the board does not expose a software-controlled
+		VBUS power switch.
+
+config RP23XX_PIO_USBHOST_VBUS_OFF_MS
+	int "VBUS power-cycle off time"
+	default 100
+	range 0 2000
+	depends on RP23XX_PIO_USBHOST_VBUS_GPIO >= 0
+	---help---
+		Time to hold the host-port VBUS switch off during explicit host
+		start. Some hubs and composite HID devices need a real discharge
+		window before they respond reliably after repeated firmware tests.
+
+config RP23XX_PIO_USBHOST_VBUS_ON_MS
+	int "VBUS power-on settle time"
+	default 250
+	range 0 3000
+	depends on RP23XX_PIO_USBHOST_VBUS_GPIO >= 0
+	---help---
+		Time to wait after enabling VBUS before starting the PIO USB host.
+
+config RP23XX_PIO_USBHOST_PIO
+	int "PIO instance"
+	default 0
+	range 0 2
+
+config RP23XX_PIO_USBHOST_TX_SM
+	int "TX state machine"
+	default 0
+	range 0 3
+
+config RP23XX_PIO_USBHOST_RX_SM
+	int "RX state machine"
+	default 1
+	range 0 3
+
+config RP23XX_PIO_USBHOST_EOP_SM
+	int "EOP state machine"
+	default 2
+	range 0 3
+
+config RP23XX_PIO_USBHOST_DMA_CHANNEL
+	int "Compatibility DMA channel id"
+	default 9
+	range 0 15
+	---help---
+		Pico-PIO-USB stores a DMA channel id in its transport state. The
+		NuttX port allocates a real DMA channel through rp23xx_dmachannel()
+		and uses this value only as the compatibility handle.
+
+config RP23XX_PIO_USBHOST_FRAME_IRQ
+	bool "Run frame pump from the timer interrupt"
+	default n
+	---help---
+		Run Pico-PIO-USB's 1 ms host frame pump directly from the TIMER0
+		alarm ISR. This matches the Pico SDK/TinyUSB host cadence more
+		closely and removes scheduler jitter from SOF and control-transfer
+		timing during Fruit Jam hub bring-up.
+
+config RP23XX_PIO_USBHOST_FRAME_PRIO
+	int "Frame pump thread priority"
+	default 90
+	depends on !RP23XX_PIO_USBHOST_FRAME_IRQ
+	---help---
+		Priority for the thread that runs Pico-PIO-USB's 1 ms host frame
+		pump. Keep this below the CDC/NSH recovery path while bringing up
+		keyboard and mouse enumeration.
+
+config RP23XX_PIO_USBHOST_FRAME_STACKSIZE
+	int "Frame pump thread stack size"
+	default 2048
+	depends on !RP23XX_PIO_USBHOST_FRAME_IRQ
+	---help---
+		Stack size for the PIO USB host frame pump thread.
+
+config RP23XX_PIO_USBHOST_TIMER_ALARM
+	int "TIMER0 alarm used for USB SOF"
+	default 3
+	range 0 3
+
+config RP23XX_PIO_USBHOST_DESCSIZE
+	int "Descriptor buffer size"
+	default 128
+	range 64 512
+
+config RP23XX_PIO_USBHOST_FIRST_ADDRESS
+	int "First USB device address"
+	default 1
+	range 1 127
+	---help---
+		First device address allocated by the PIO USB host root port.
+		Most controllers start at address 1. Some hub-focused bring-up
+		configurations may reserve lower addresses to match a known-good
+		stack while debugging hub enumeration timing.
+
+config RP23XX_PIO_USBHOST_XFER_TIMEOUT_MS
+	int "Synchronous transfer timeout in milliseconds"
+	default 5000
+	range 100 30000
+
+config RP23XX_PIO_USBHOST_ENUM_DELAY_MS
+	int "Root-port settle delay before reset"
+	default 100
+	range 50 1000
+
+config RP23XX_PIO_USBHOST_RESET_MS
+	int "Root-port reset duration"
+	default 20
+	range 10 100
+
+config RP23XX_PIO_USBHOST_POST_RESET_MS
+	int "Root-port post-reset settle delay"
+	default 50
+	range 10 500
+
+config RP23XX_PIO_USBHOST_SETADDR_DELAY_MS
+	int "Post SET_ADDRESS settle delay"
+	default 10
+	range 2 1000
+	---help---
+		Additional delay after the control status stage of SET_ADDRESS.
+		The common USB host enumerator already waits for the USB-specified
+		minimum. The PIO host can need a little extra guard time before the
+		next setup packet is sent to the new address.
+
+config RP23XX_PIO_USBHOST_ENUM_ATTEMPTS
+	int "Root-port enumeration attempts"
+	default 3
+	range 1 8
+	---help---
+		Number of clean root-port reset/enumeration attempts before the
+		PIO USB host reports the root device as failed. Each attempt closes
+		stale PIO endpoint state and re-enumerates from address zero.
+
+config RP23XX_PIO_USBHOST_CTRL_GAP_MS
+	int "Inter-control-transfer gap"
+	default 1
+	range 0 50
+	---help---
+		Small delay after a completed control transfer, and between setup
+		retries. This gives slow hubs and composite HID devices a little
+		breathing room without changing the USB host class logic.
+
+config RP23XX_PIO_USBHOST_CTRL_RETRIES
+	int "Setup-phase control retries"
+	default 2
+	range 0 8
+	---help---
+		Number of extra attempts for control transfers that fail before
+		the SETUP packet is ACKed. The retry is restricted to setup-phase
+		failures so side-effecting requests are not repeated after the
+		device has already accepted them.
+
+endif # RP23XX_PIO_USBHOST
+
+#####################################################################
 #  HSTX DVI Configuration
 #####################################################################
 

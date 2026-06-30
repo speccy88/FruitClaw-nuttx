@@ -78,6 +78,11 @@ if(CONFIG_RP23XX_HSTX_DVI)
   list(APPEND SRCS rp23xx_dvi.c)
 endif()
 
+if(CONFIG_RP23XX_PIO_USBHOST)
+  list(APPEND SRCS rp23xx_pio_usbhost.c pio_usb/pio_usb.c
+       pio_usb/pio_usb_host.c pio_usb/usb_crc.c)
+endif()
+
 if(CONFIG_USBDEV)
   list(APPEND SRCS rp23xx_usbdev.c)
 endif()

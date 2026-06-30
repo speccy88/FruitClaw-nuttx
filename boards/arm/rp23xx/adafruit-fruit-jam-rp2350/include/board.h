@@ -213,6 +213,11 @@ extern "C"
  * Public Function Prototypes
  ****************************************************************************/
 
+#ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_BOOT_GUARD
+void board_fruitjam_bootguard_arm(void);
+void board_fruitjam_bootguard_disarm(void);
+#endif
+
 /****************************************************************************
  * Name: rp23xx_boardearlyinitialize
  *

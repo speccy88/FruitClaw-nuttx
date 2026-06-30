@@ -123,6 +123,10 @@ struct usbhost_hubpriv_s
   uint8_t                   ocmode;       /* Over current protection mode */
   uint8_t                   ctrlcurrent;  /* Control current */
   volatile bool             disconnected; /* TRUE: Device has been disconnected */
+  uint8_t                   retryscan;    /* Ports needing another reset scan */
+  bool                      initialscan;  /* TRUE: Scan all powered ports once */
+  bool                      pollscan;     /* TRUE: Poll every port this pass */
+  struct work_s             retrywork;    /* Delayed scan retry work */
   bool                      compounddev;  /* Hub is part of compound device */
   bool                      indicator;    /* Port indicator */
   uint16_t                  pwrondelay;   /* Power on wait time in ms */
@@ -142,6 +146,8 @@ struct usbhost_hubclass_s
 {
   struct usbhost_class_s   hubclass;      /* Publicly visible class data */
   struct usbhost_hubpriv_s hubpriv;       /* Private class data */
+  FAR struct usbhost_hubclass_s *flink;   /* Next live hub instance */
+  bool                      listed;       /* TRUE: In the live hub list */
 };
 
 /****************************************************************************
@@ -157,6 +163,7 @@ static inline int usbhost_hubpwr(FAR struct usbhost_hubpriv_s *priv,
                                  FAR struct usbhost_hubport_s *hport,
                                  bool on);
 static void usbhost_hub_event(FAR void *arg);
+static void usbhost_hub_retry(FAR void *arg);
 static void usbhost_disconnect_event(FAR void *arg);
 
 /* (Little Endian) Data helpers */
@@ -164,6 +171,9 @@ static void usbhost_disconnect_event(FAR void *arg);
 static inline uint16_t usbhost_getle16(const uint8_t *val);
 static void usbhost_putle16(uint8_t *dest, uint16_t val);
 static void usbhost_callback(FAR void *arg, ssize_t nbytes);
+static void usbhost_hub_addinstance(FAR struct usbhost_hubclass_s *hub);
+static void usbhost_hub_removeinstance(FAR struct usbhost_hubclass_s *hub);
+static void usbhost_hub_markallports(FAR struct usbhost_hubpriv_s *priv);
 
 /* struct usbhost_registry_s methods */
 
@@ -220,9 +230,103 @@ static struct usbhost_registry_s g_hub =
   g_id                    /* id[]     */
 };
 
+/* Live hub instances.  Used by board bring-up tools to force a port poll
+ * when a hub interrupt change notification was missed.
+ */
+
+static FAR struct usbhost_hubclass_s *g_hub_instances;
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: usbhost_hub_addinstance
+ *
+ * Description:
+ *   Add a connected hub class instance to the live hub list.
+ *
+ ****************************************************************************/
+
+static void usbhost_hub_addinstance(FAR struct usbhost_hubclass_s *hub)
+{
+  irqstate_t flags;
+
+  DEBUGASSERT(hub != NULL);
+
+  flags = enter_critical_section();
+  if (!hub->listed)
+    {
+      hub->flink = g_hub_instances;
+      g_hub_instances = hub;
+      hub->listed = true;
+    }
+
+  leave_critical_section(flags);
+}
+
+/****************************************************************************
+ * Name: usbhost_hub_removeinstance
+ *
+ * Description:
+ *   Remove a hub class instance from the live hub list.
+ *
+ ****************************************************************************/
+
+static void usbhost_hub_removeinstance(FAR struct usbhost_hubclass_s *hub)
+{
+  FAR struct usbhost_hubclass_s *curr;
+  FAR struct usbhost_hubclass_s *prev;
+  irqstate_t flags;
+
+  DEBUGASSERT(hub != NULL);
+
+  flags = enter_critical_section();
+
+  for (prev = NULL, curr = g_hub_instances;
+       curr != NULL;
+       prev = curr, curr = curr->flink)
+    {
+      if (curr == hub)
+        {
+          if (prev == NULL)
+            {
+              g_hub_instances = curr->flink;
+            }
+          else
+            {
+              prev->flink = curr->flink;
+            }
+
+          hub->flink = NULL;
+          hub->listed = false;
+          break;
+        }
+    }
+
+  leave_critical_section(flags);
+}
+
+/****************************************************************************
+ * Name: usbhost_hub_markallports
+ *
+ * Description:
+ *   Mark every downstream port as needing a status poll.
+ *
+ ****************************************************************************/
+
+static void usbhost_hub_markallports(FAR struct usbhost_hubpriv_s *priv)
+{
+  int port;
+
+  DEBUGASSERT(priv != NULL && priv->buffer != NULL);
+
+  memset(priv->buffer, 0, INTIN_BUFSIZE);
+  for (port = 1; port <= priv->nports; port++)
+    {
+      priv->buffer[0] |= (1 << port);
+    }
+}
 
 /****************************************************************************
  * Name: usbhost_hport_deactivate
@@ -715,6 +819,15 @@ static void usbhost_hub_event(FAR void *arg)
   uint16_t mask;
   uint16_t feat;
   uint8_t statuschange;
+  uint8_t portbit;
+  bool initialscan;
+  bool pollscan;
+  bool forceconnect;
+  bool forcedisconnect;
+  bool childconnect = false;
+  bool retryscanport;
+  bool rescanport;
+  bool stopscan = false;
   int port;
   int ret;
   size_t maxlen;
@@ -739,7 +852,19 @@ static void usbhost_hub_event(FAR void *arg)
   DEBUGASSERT(hubclass->hport);
   hport = hubclass->hport;
 
-  statuschange = priv->buffer[0];
+  statuschange = priv->buffer[0] | priv->retryscan;
+  initialscan = priv->initialscan;
+  pollscan = priv->pollscan;
+  priv->initialscan = false;
+  priv->pollscan = false;
+  if (initialscan || pollscan)
+    {
+      for (port = 1; port <= priv->nports; port++)
+        {
+          statuschange |= (1 << port);
+        }
+    }
+
   uinfo("StatusChange: %02x\n", statuschange);
 
   ret = DRVR_ALLOC(hport->drvr, (FAR uint8_t **)&portstatus, &maxlen);
@@ -755,7 +880,8 @@ static void usbhost_hub_event(FAR void *arg)
     {
       /* Check if port status has changed */
 
-      if ((statuschange & (1 << port)) == 0)
+      portbit = 1 << port;
+      if ((statuschange & portbit) == 0)
         {
           continue;
         }
@@ -764,7 +890,7 @@ static void usbhost_hub_event(FAR void *arg)
 
       /* Port status changed, check what happened */
 
-      statuschange &= ~(1 << port);
+      statuschange &= ~portbit;
 
       /* Read hub port status */
 
@@ -784,6 +910,73 @@ static void usbhost_hub_event(FAR void *arg)
 
       status = usbhost_getle16(portstatus->status);
       change = usbhost_getle16(portstatus->change);
+      connport = &priv->hport[PORT_INDX(port)];
+      retryscanport = (priv->retryscan & portbit) != 0;
+      rescanport = initialscan || pollscan || retryscanport;
+
+      if (rescanport && (status & USBHUB_PORT_STAT_POWER) == 0)
+        {
+          ctrlreq->type = USBHUB_REQ_TYPE_PORT;
+          ctrlreq->req  = USBHUB_REQ_SETFEATURE;
+          usbhost_putle16(ctrlreq->value, USBHUB_PORT_FEAT_POWER);
+          usbhost_putle16(ctrlreq->index, port);
+          usbhost_putle16(ctrlreq->len, 0);
+
+          ret = DRVR_CTRLOUT(hport->drvr, hport->ep0, ctrlreq, NULL);
+          if (ret < 0)
+            {
+              uerr("ERROR: Failed to re-power port %d: %d\n", port, ret);
+            }
+          else
+            {
+              if (priv->pwrondelay > 0)
+                {
+                  nxsched_usleep(priv->pwrondelay * 1000);
+                }
+
+              ctrlreq->type = USB_REQ_DIR_IN | USBHUB_REQ_TYPE_PORT;
+              ctrlreq->req  = USBHUB_REQ_GETSTATUS;
+              usbhost_putle16(ctrlreq->value, 0);
+              usbhost_putle16(ctrlreq->index, port);
+              usbhost_putle16(ctrlreq->len, USB_SIZEOF_PORTSTS);
+
+              ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq,
+                                (FAR uint8_t *)portstatus);
+              if (ret < 0)
+                {
+                  uerr("ERROR: Failed to reread port %d status: %d\n",
+                       port, ret);
+                  continue;
+                }
+
+              status = usbhost_getle16(portstatus->status);
+              change = usbhost_getle16(portstatus->change);
+            }
+        }
+
+      if (rescanport && (status & USBHUB_PORT_STAT_POWER) == 0)
+        {
+          uinfo("Port %d did not report power after enable\n", port);
+        }
+
+      if ((status & USBHUB_PORT_STAT_CONNECTION) == 0 ||
+          (status & USBHUB_PORT_STAT_ENABLE) != 0 ||
+          connport->devclass != NULL)
+        {
+          priv->retryscan &= ~portbit;
+        }
+      else if ((status & USBHUB_PORT_STAT_ENABLE) == 0)
+        {
+          priv->retryscan |= portbit;
+        }
+
+      forceconnect = rescanport &&
+                     (status & USBHUB_PORT_STAT_CONNECTION) != 0 &&
+                     connport->devclass == NULL;
+      forcedisconnect = pollscan &&
+                        (status & USBHUB_PORT_STAT_CONNECTION) == 0 &&
+                        (connport->devclass != NULL ||
+                         connport->funcaddr != 0);
 
       /* First, clear all change bits */
 
@@ -818,7 +1011,8 @@ static void usbhost_hub_event(FAR void *arg)
 
       /* Handle connect or disconnect, no power management */
 
-      if ((change & USBHUB_PORT_STAT_CCONNECTION) != 0)
+      if (forceconnect || forcedisconnect ||
+          (change & USBHUB_PORT_STAT_CCONNECTION) != 0)
         {
           uint16_t debouncetime = 0;
           uint16_t debouncestable = 0;
@@ -889,62 +1083,99 @@ static void usbhost_hub_event(FAR void *arg)
 
           if ((status & USBHUB_PORT_STAT_CONNECTION) != 0)
             {
+              bool portenabled = false;
+              int resettry;
+
               /* Device connected to a port on the hub */
 
               uinfo("Connection on port %d\n", port);
 
-              ctrlreq->type = USBHUB_REQ_TYPE_PORT;
-              ctrlreq->req  = USBHUB_REQ_SETFEATURE;
-              usbhost_putle16(ctrlreq->value, USBHUB_PORT_FEAT_RESET);
-              usbhost_putle16(ctrlreq->index, port);
-              usbhost_putle16(ctrlreq->len, 0);
-
-              ret = DRVR_CTRLOUT(hport->drvr, hport->ep0, ctrlreq, NULL);
-              if (ret < 0)
+              if (forceconnect &&
+                  (connport->funcaddr != 0 || connport->ep0 != NULL))
                 {
-                  uerr("ERROR: Failed to reset port %d: %d\n", port, ret);
-                  continue;
+                  usbhost_hport_deactivate(connport);
                 }
 
-              nxsched_usleep(100 * 1000);
-
-              ctrlreq->type = USB_REQ_DIR_IN | USBHUB_REQ_TYPE_PORT;
-              ctrlreq->req  = USBHUB_REQ_GETSTATUS;
-              usbhost_putle16(ctrlreq->value, 0);
-              usbhost_putle16(ctrlreq->index, port);
-              usbhost_putle16(ctrlreq->len, USB_SIZEOF_PORTSTS);
-
-              ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq,
-                                (FAR uint8_t *)portstatus);
-              if (ret < 0)
+              for (resettry = 0; resettry < 5 && !portenabled; resettry++)
                 {
-                  uerr("ERROR: Failed to get port %d status: %d\n",
-                       port, ret);
-                  continue;
+                  if (resettry > 0)
+                    {
+                      nxsched_usleep(150 * 1000);
+                    }
+
+                  ctrlreq->type = USBHUB_REQ_TYPE_PORT;
+                  ctrlreq->req  = USBHUB_REQ_SETFEATURE;
+                  usbhost_putle16(ctrlreq->value, USBHUB_PORT_FEAT_RESET);
+                  usbhost_putle16(ctrlreq->index, port);
+                  usbhost_putle16(ctrlreq->len, 0);
+
+                  ret = DRVR_CTRLOUT(hport->drvr, hport->ep0, ctrlreq,
+                                     NULL);
+                  if (ret < 0)
+                    {
+                      uerr("ERROR: Failed to reset port %d try %d: %d\n",
+                           port, resettry + 1, ret);
+                      continue;
+                    }
+
+                  nxsched_usleep(100 * 1000);
+
+                  for (uint16_t resettime = 100; resettime < 2000;
+                       resettime += 25)
+                    {
+                      nxsched_usleep(25 * 1000);
+
+                      ctrlreq->type = USB_REQ_DIR_IN | USBHUB_REQ_TYPE_PORT;
+                      ctrlreq->req  = USBHUB_REQ_GETSTATUS;
+                      usbhost_putle16(ctrlreq->value, 0);
+                      usbhost_putle16(ctrlreq->index, port);
+                      usbhost_putle16(ctrlreq->len, USB_SIZEOF_PORTSTS);
+
+                      ret = DRVR_CTRLIN(hport->drvr, hport->ep0, ctrlreq,
+                                        (FAR uint8_t *)portstatus);
+                      if (ret < 0)
+                        {
+                          uerr("ERROR: Failed to get port %d status: %d\n",
+                               port, ret);
+                          break;
+                        }
+
+                      status = usbhost_getle16(portstatus->status);
+                      change = usbhost_getle16(portstatus->change);
+
+                      if ((change & USBHUB_PORT_STAT_CRESET) != 0)
+                        {
+                          ctrlreq->type = USBHUB_REQ_TYPE_PORT;
+                          ctrlreq->req  = USBHUB_REQ_CLEARFEATURE;
+                          usbhost_putle16(ctrlreq->value,
+                                          USBHUB_PORT_FEAT_CRESET);
+                          usbhost_putle16(ctrlreq->index, port);
+                          usbhost_putle16(ctrlreq->len, 0);
+
+                          DRVR_CTRLOUT(hport->drvr, hport->ep0, ctrlreq,
+                                       NULL);
+                        }
+
+                      if ((status & USBHUB_PORT_STAT_RESET) == 0 &&
+                          (status & USBHUB_PORT_STAT_ENABLE) != 0)
+                        {
+                          portenabled = true;
+                          break;
+                        }
+                    }
                 }
 
-              status = usbhost_getle16(portstatus->status);
-              change = usbhost_getle16(portstatus->change);
+              if (ret < 0)
+                {
+                  priv->retryscan |= portbit;
+                  continue;
+                }
 
               uinfo("port %d status %04x change %04x after reset\n",
                     port, status, change);
 
-              if ((status & USBHUB_PORT_STAT_RESET)  == 0 &&
-                  (status & USBHUB_PORT_STAT_ENABLE) != 0)
+              if (portenabled)
                 {
-                  if ((change & USBHUB_PORT_STAT_CRESET) != 0)
-                    {
-                      ctrlreq->type = USBHUB_REQ_TYPE_PORT;
-                      ctrlreq->req  = USBHUB_REQ_CLEARFEATURE;
-                      usbhost_putle16(ctrlreq->value,
-                                      USBHUB_PORT_FEAT_CRESET);
-                      usbhost_putle16(ctrlreq->index, port);
-                      usbhost_putle16(ctrlreq->len, 0);
-
-                      DRVR_CTRLOUT(hport->drvr, hport->ep0, ctrlreq, NULL);
-                    }
-
-                  connport = &priv->hport[PORT_INDX(port)];
                   if ((status & USBHUB_PORT_STAT_HIGH_SPEED) != 0)
                     {
                       connport->speed = USB_SPEED_HIGH;
@@ -967,6 +1198,7 @@ static void usbhost_hub_event(FAR void *arg)
                     {
                       uerr("ERROR: usbhost_hport_activate failed: %d\n",
                             ret);
+                      priv->retryscan |= portbit;
                     }
                   else
                     {
@@ -979,12 +1211,21 @@ static void usbhost_hub_event(FAR void *arg)
                         {
                           uerr("ERROR: DRVR_CONNECT failed: %d\n", ret);
                           usbhost_hport_deactivate(connport);
+                          priv->retryscan |= portbit;
+                        }
+                      else
+                        {
+                          childconnect = true;
+                          priv->retryscan &= ~portbit;
+                          priv->retryscan |= statuschange & ~1;
+                          stopscan = true;
                         }
                     }
                 }
               else
                 {
                   uerr("ERROR: Failed to enable port %d\n", port);
+                  priv->retryscan |= portbit;
                   continue;
                 }
             }
@@ -1033,12 +1274,19 @@ static void usbhost_hub_event(FAR void *arg)
 
                   usbhost_hport_deactivate(connport);
                 }
+
+              priv->retryscan &= ~portbit;
             }
         }
       else if (change)
         {
           uwarn("WARNING: status %04x change %04x not handled\n",
                  status, change);
+        }
+
+      if (stopscan)
+        {
+          break;
         }
     }
 
@@ -1062,8 +1310,28 @@ static void usbhost_hub_event(FAR void *arg)
    * removed.
    */
 
+  if (childconnect)
+    {
+      nxsched_usleep(1000 * 1000);
+    }
+
   flags = enter_critical_section();
-  if (!priv->disconnected)
+  if (!priv->disconnected && priv->retryscan != 0)
+    {
+      memset(priv->buffer, 0, INTIN_BUFSIZE);
+      priv->buffer[0] = priv->retryscan;
+
+      if (work_available(&priv->retrywork))
+        {
+          ret = work_queue(LPWORK, &priv->retrywork, usbhost_hub_retry,
+                           hubclass, MSEC2TICK(100));
+          if (ret < 0)
+            {
+              uerr("ERROR: Failed to queue hub retry work: %d\n", ret);
+            }
+        }
+    }
+  else if (!priv->disconnected)
     {
       /* Wait for the next hub event */
 
@@ -1073,6 +1341,61 @@ static void usbhost_hub_event(FAR void *arg)
       if (ret < 0)
         {
           uerr("ERROR: Failed to queue interrupt endpoint: %d\n", ret);
+        }
+    }
+
+  leave_critical_section(flags);
+}
+
+/****************************************************************************
+ * Name: usbhost_hub_retry
+ *
+ * Description:
+ *   Re-queue hub scanning after the current hub event worker has returned.
+ *
+ ****************************************************************************/
+
+static void usbhost_hub_retry(FAR void *arg)
+{
+  FAR struct usbhost_class_s *hubclass;
+  FAR struct usbhost_hubpriv_s *priv;
+  irqstate_t flags;
+  int ret;
+
+  DEBUGASSERT(arg != NULL);
+  hubclass = (FAR struct usbhost_class_s *)arg;
+  priv     = &((FAR struct usbhost_hubclass_s *)hubclass)->hubpriv;
+
+  flags = enter_critical_section();
+  if (!priv->disconnected && (priv->retryscan != 0 || priv->pollscan))
+    {
+      if (priv->retryscan != 0)
+        {
+          memset(priv->buffer, 0, INTIN_BUFSIZE);
+          priv->buffer[0] = priv->retryscan;
+        }
+      else
+        {
+          usbhost_hub_markallports(priv);
+        }
+
+      if (work_available(&priv->work))
+        {
+          ret = work_queue(LPWORK, &priv->work, usbhost_hub_event,
+                           hubclass, 0);
+          if (ret < 0)
+            {
+              uerr("ERROR: Failed to queue hub event retry: %d\n", ret);
+            }
+        }
+      else if (work_available(&priv->retrywork))
+        {
+          ret = work_queue(LPWORK, &priv->retrywork, usbhost_hub_retry,
+                           hubclass, MSEC2TICK(50));
+          if (ret < 0)
+            {
+              uerr("ERROR: Failed to requeue hub retry: %d\n", ret);
+            }
         }
     }
 
@@ -1116,6 +1439,8 @@ static void usbhost_disconnect_event(FAR void *arg)
   hport = hubclass->hport;
 
   uinfo("Destroying hub on port %d\n", PORT_NO(hport->port));
+
+  usbhost_hub_removeinstance((FAR struct usbhost_hubclass_s *)hubclass);
 
   /* Set an indication to any users of the device that the device is no
    * longer available.
@@ -1268,11 +1593,23 @@ static void usbhost_callback(FAR void *arg, ssize_t nbytes)
         }
 
       /* Indicate there there is nothing to do.  So when the work is
-       * performed, nothing will happen other than we will set to receive
-       * the next event.
+       * performed, poll every port once.  Some lower-end host controllers
+       * complete hub interrupt polling with an error/NAK instead of leaving
+       * the request pending.  A full poll keeps late plug/unplug events from
+       * being missed.
        */
 
-      priv->buffer[0] = 0;
+      memset(priv->buffer, 0, INTIN_BUFSIZE);
+      if (priv->retryscan != 0)
+        {
+          priv->buffer[0] = priv->retryscan;
+        }
+      else
+        {
+          usbhost_hub_markallports(priv);
+        }
+
+      priv->pollscan = true;
 
       /* We don't know the nature of the failure, but we need to do all that
        * we can do to avoid a CPU hog error loop.
@@ -1294,6 +1631,11 @@ static void usbhost_callback(FAR void *arg, ssize_t nbytes)
     {
       work_queue(LPWORK, &priv->work, usbhost_hub_event,
                  hubclass, delay);
+    }
+  else if (!priv->disconnected && work_available(&priv->retrywork))
+    {
+      work_queue(LPWORK, &priv->retrywork, usbhost_hub_retry,
+                 hubclass, MSEC2TICK(50));
     }
 }
 
@@ -1484,14 +1826,29 @@ static int usbhost_connect(FAR struct usbhost_class_s *hubclass,
       return ret;
     }
 
-  /* Begin monitoring of port status change events */
+  /* Some hubs do not reliably report an interrupt change for devices that
+   * were already present when downstream port power was enabled.  Do one
+   * initial explicit scan of every port, then the event worker will queue the
+   * normal interrupt endpoint monitor before returning.
+   */
 
-  ret = DRVR_ASYNCH(hport->drvr, priv->intin, (FAR uint8_t *)priv->buffer,
-                    INTIN_BUFSIZE, usbhost_callback, hubclass);
+  if (priv->pwrondelay > 0)
+    {
+      nxsched_usleep(priv->pwrondelay * 1000);
+    }
+
+  usbhost_hub_markallports(priv);
+  priv->initialscan = true;
+
+  ret = work_queue(LPWORK, &priv->work, usbhost_hub_event, hubclass, 0);
   if (ret < 0)
     {
-      uerr("ERROR: DRVR_ASYNCH failed: %d\n", ret);
+      uerr("ERROR: Failed to queue initial hub scan: %d\n", ret);
       usbhost_hubpwr(priv, hport, false);
+    }
+  else
+    {
+      usbhost_hub_addinstance((FAR struct usbhost_hubclass_s *)hubclass);
     }
 
   return ret;
@@ -1556,6 +1913,89 @@ static int usbhost_disconnected(struct usbhost_class_s *hubclass)
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
+
+/****************************************************************************
+ * Name: usbhost_hub_rescan
+ *
+ * Description:
+ *   Force every live hub class instance to poll all downstream ports once.
+ *
+ * Returned Value:
+ *   A positive number of queued hub scans, zero if a scan was already
+ *   pending/running, or a negated errno value on failure.
+ *
+ ****************************************************************************/
+
+int usbhost_hub_rescan(void)
+{
+  FAR struct usbhost_hubclass_s *hub;
+  irqstate_t flags;
+  int queued = 0;
+  int seen = 0;
+  int ret = OK;
+
+  flags = enter_critical_section();
+
+  for (hub = g_hub_instances; hub != NULL; hub = hub->flink)
+    {
+      FAR struct usbhost_hubpriv_s *priv = &hub->hubpriv;
+      FAR struct usbhost_hubport_s *hport = hub->hubclass.hport;
+
+      if (priv->disconnected || hport == NULL || priv->buffer == NULL ||
+          priv->intin == NULL)
+        {
+          continue;
+        }
+
+      seen++;
+      usbhost_hub_markallports(priv);
+      priv->pollscan = true;
+
+      /* Drop the pending interrupt monitor request so the explicit poll can
+       * run immediately.  The completion callback may also queue the worker;
+       * that is fine because the hub work item serializes the actual scan.
+       */
+
+      DRVR_CANCEL(hport->drvr, priv->intin);
+
+      if (work_available(&priv->work))
+        {
+          ret = work_queue(LPWORK, &priv->work, usbhost_hub_event,
+                           &hub->hubclass, 0);
+          if (ret < 0)
+            {
+              break;
+            }
+
+          queued++;
+        }
+      else if (work_available(&priv->retrywork))
+        {
+          ret = work_queue(LPWORK, &priv->retrywork, usbhost_hub_retry,
+                           &hub->hubclass, MSEC2TICK(50));
+          if (ret < 0)
+            {
+              break;
+            }
+
+          queued++;
+        }
+    }
+
+  leave_critical_section(flags);
+
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (queued > 0)
+    {
+      return queued;
+    }
+
+  return seen > 0 ? OK : -ENODEV;
+}
 
 /****************************************************************************
  * Name: usbhost_hub_initialize

@@ -709,6 +709,12 @@ int usbhost_composite(FAR struct usbhost_hubport_s *hport,
               FAR struct usb_ifdesc_s *ifdesc =
                 (FAR struct usb_ifdesc_s *)desc;
 
+              if (ifdesc->alt != 0)
+                {
+                  offset += len;
+                  continue;
+                }
+
               /* Was the interface merged via an IAD descriptor? */
 
               DEBUGASSERT(ifdesc->ifno < 32);
@@ -717,6 +723,12 @@ int usbhost_composite(FAR struct usbhost_hubport_s *hport,
                   /* No, this interface was not merged.  Save the registry
                    * lookup information from the interface descriptor.
                    */
+
+                  if (i >= nclasses)
+                    {
+                      ret = -EINVAL;
+                      goto errout_with_members;
+                    }
 
                   member              = (FAR struct usbhost_member_s *)
                                          &priv->members[i];
@@ -746,6 +758,12 @@ int usbhost_composite(FAR struct usbhost_hubport_s *hport,
                 (FAR struct usb_iaddesc_s *)desc;
 
               /* Yes.. Save the registry lookup information from the IAD. */
+
+              if (i >= nclasses)
+                {
+                  ret = -EINVAL;
+                  goto errout_with_members;
+                }
 
               member              = (FAR struct usbhost_member_s *)
                                     &priv->members[i];

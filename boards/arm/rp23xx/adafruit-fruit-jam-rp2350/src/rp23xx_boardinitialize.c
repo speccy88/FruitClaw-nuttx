@@ -201,6 +201,18 @@ static void fruitjam_bootguard_schedule(void)
                  fruitjam_bootguard_worker, NULL, delay);
     }
 }
+
+void board_fruitjam_bootguard_arm(void)
+{
+  fruitjam_bootguard_arm();
+  fruitjam_bootguard_schedule();
+}
+
+void board_fruitjam_bootguard_disarm(void)
+{
+  work_cancel(HPWORK, &g_fruitjam_bootguard_work);
+  fruitjam_bootguard_clear();
+}
 #endif
 
 #ifdef CONFIG_ADAFRUIT_FRUIT_JAM_RP2350_NINA

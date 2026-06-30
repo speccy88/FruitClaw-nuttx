@@ -58,7 +58,15 @@
 
 #ifdef CONFIG_HIDKBD_ENCODED
 #  include <nuttx/streams.h>
+#endif
+
+#if defined(CONFIG_HIDKBD_ENCODED) || defined(CONFIG_HIDKBD_INPUT)
 #  include <nuttx/input/kbd_codec.h>
+#endif
+
+#ifdef CONFIG_HIDKBD_INPUT
+#  include <nuttx/input/keyboard.h>
+#  include <nuttx/input/x11_keysym.h>
 #endif
 
 /* Don't compile if prerequisites are not met */
@@ -154,6 +162,41 @@
 
 #define USBHOST_MAX_CREFS   0x7fff
 
+#ifdef CONFIG_HIDKBD_INPUT_DOSKEYS
+#  define HIDKBD_DOS_KEY_RIGHTARROW 0xae
+#  define HIDKBD_DOS_KEY_LEFTARROW  0xac
+#  define HIDKBD_DOS_KEY_UPARROW    0xad
+#  define HIDKBD_DOS_KEY_DOWNARROW  0xaf
+#  define HIDKBD_DOS_KEY_ESCAPE     27
+#  define HIDKBD_DOS_KEY_ENTER      13
+#  define HIDKBD_DOS_KEY_TAB        9
+#  define HIDKBD_DOS_KEY_F1         (0x80 + 0x3b)
+#  define HIDKBD_DOS_KEY_F2         (0x80 + 0x3c)
+#  define HIDKBD_DOS_KEY_F3         (0x80 + 0x3d)
+#  define HIDKBD_DOS_KEY_F4         (0x80 + 0x3e)
+#  define HIDKBD_DOS_KEY_F5         (0x80 + 0x3f)
+#  define HIDKBD_DOS_KEY_F6         (0x80 + 0x40)
+#  define HIDKBD_DOS_KEY_F7         (0x80 + 0x41)
+#  define HIDKBD_DOS_KEY_F8         (0x80 + 0x42)
+#  define HIDKBD_DOS_KEY_F9         (0x80 + 0x43)
+#  define HIDKBD_DOS_KEY_F10        (0x80 + 0x44)
+#  define HIDKBD_DOS_KEY_F11        (0x80 + 0x57)
+#  define HIDKBD_DOS_KEY_F12        (0x80 + 0x58)
+#  define HIDKBD_DOS_KEY_BACKSPACE  0x7f
+#  define HIDKBD_DOS_KEY_PAUSE      0xff
+#  define HIDKBD_DOS_KEY_RSHIFT     (0x80 + 0x36)
+#  define HIDKBD_DOS_KEY_RCTRL      (0x80 + 0x1d)
+#  define HIDKBD_DOS_KEY_RALT       (0x80 + 0x38)
+#  define HIDKBD_DOS_KEY_CAPSLOCK   (0x80 + 0x3a)
+#  define HIDKBD_DOS_KEY_SCRLCK     (0x80 + 0x46)
+#  define HIDKBD_DOS_KEY_HOME       (0x80 + 0x47)
+#  define HIDKBD_DOS_KEY_END        (0x80 + 0x4f)
+#  define HIDKBD_DOS_KEY_PGUP       (0x80 + 0x49)
+#  define HIDKBD_DOS_KEY_PGDN       (0x80 + 0x51)
+#  define HIDKBD_DOS_KEY_INS        (0x80 + 0x52)
+#  define HIDKBD_DOS_KEY_DEL        (0x80 + 0x53)
+#endif
+
 /* Debug ********************************************************************/
 
 /* Both CONFIG_DEBUG_INPUT and CONFIG_DEBUG_USB could apply to this file.
@@ -236,7 +279,13 @@ struct usbhost_state_s
 
 #ifdef CONFIG_HIDKBD_NOGETREPORT
   struct work_s           rwork;        /* For interrupt transfer work */
+  struct work_s           rretrywork;   /* Delayed interrupt transfer retry */
   int16_t                 nbytes;       /* # of bytes actually transferred */
+#endif
+#ifdef CONFIG_HIDKBD_INPUT
+  bool                    input_registered; /* Attached to aggregate input */
+  uint8_t                 input_lastkey[6];
+  uint8_t                 input_lastmod;
 #endif
 #ifndef CONFIG_HIDKBD_NODEBOUNCE
   uint8_t                 lastkey[6];   /* For debouncing */
@@ -287,6 +336,7 @@ static inline void usbhost_encodescancode(FAR struct usbhost_state_s *priv,
 static int  usbhost_kbdpoll(int argc, FAR char *argv[]);
 
 #ifdef CONFIG_HIDKBD_NOGETREPORT
+static void usbhost_kbd_retry(FAR void *arg);
 static void usbhost_kbd_work(FAR void *arg);
 static void usbhost_kbd_callback(FAR void *arg, ssize_t nbytes);
 #endif
@@ -307,6 +357,11 @@ static inline int usbhost_cfgdesc(FAR struct usbhost_state_s *priv,
                                   FAR const uint8_t *configdesc,
                                   int desclen);
 static inline int usbhost_devinit(FAR struct usbhost_state_s *priv);
+
+#ifdef CONFIG_HIDKBD_INPUT
+static int usbhost_input_attach(FAR struct usbhost_state_s *priv);
+static void usbhost_input_detach(FAR struct usbhost_state_s *priv);
+#endif
 
 /* (Little Endian) Data helpers */
 
@@ -396,6 +451,17 @@ static spinlock_t g_lock = SP_UNLOCKED;
 /* Global caps lock status */
 
 static bool g_caps_lock = false;
+
+#ifdef CONFIG_HIDKBD_INPUT
+/* Aggregate all connected USB HID keyboards into the configured input node.
+ * Per-device raw /dev/kbd[a-z] nodes remain available for diagnostics.
+ */
+
+static mutex_t g_hidkbd_input_lock = NXMUTEX_INITIALIZER;
+static struct keyboard_lowerhalf_s g_hidkbd_inputlower;
+static uint8_t g_hidkbd_input_refs;
+static bool g_hidkbd_input_registered;
+#endif
 
 /* The following tables map keyboard scan codes to printable ASCII
  * characters.  There is no support here for function keys or cursor
@@ -753,7 +819,7 @@ static int usbhost_allocdevno(FAR struct usbhost_state_s *priv)
 
 static void usbhost_freedevno(FAR struct usbhost_state_s *priv)
 {
-  int devno = 'a' - priv->devchar;
+  int devno = priv->devchar - 'a';
 
   if (devno >= 0 && devno < 26)
     {
@@ -801,6 +867,10 @@ static void usbhost_destroy(FAR void *arg)
   uinfo("Unregister driver\n");
   usbhost_mkdevname(priv, devname);
   unregister_driver(devname);
+
+#ifdef CONFIG_HIDKBD_INPUT
+  usbhost_input_detach(priv);
+#endif
 
   /* Release the device name used by this connection */
 
@@ -976,6 +1046,481 @@ static inline uint8_t usbhost_mapscancode(uint8_t scancode, uint8_t modifier)
 }
 
 /****************************************************************************
+ * Name: usbhost_input_keycode
+ *
+ * Description:
+ *   Map a USB HID keyboard usage to the generic keyboard input event code.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_HIDKBD_INPUT
+static uint32_t usbhost_input_keycode(uint8_t scancode)
+{
+  if (scancode >= USBHID_KBDUSE_A && scancode <= USBHID_KBDUSE_A + 25)
+    {
+      return 'a' + scancode - USBHID_KBDUSE_A;
+    }
+
+  if (scancode >= USBHID_KBDUSE_1 && scancode <= USBHID_KBDUSE_1 + 8)
+    {
+      return '1' + scancode - USBHID_KBDUSE_1;
+    }
+
+  if (scancode == USBHID_KBDUSE_0)
+    {
+      return '0';
+    }
+
+  switch (scancode)
+    {
+#ifdef CONFIG_HIDKBD_INPUT_DOSKEYS
+      case USBHID_KBDUSE_ENTER:
+      case USBHID_KBDUSE_KPDEMTER:
+        return HIDKBD_DOS_KEY_ENTER;
+
+      case USBHID_KBDUSE_ESCAPE:
+        return HIDKBD_DOS_KEY_ESCAPE;
+
+      case USBHID_KBDUSE_DELETE:
+        return HIDKBD_DOS_KEY_BACKSPACE;
+
+      case USBHID_KBDUSE_TAB:
+        return HIDKBD_DOS_KEY_TAB;
+
+      case USBHID_KBDUSE_CAPSLOCK:
+        return HIDKBD_DOS_KEY_CAPSLOCK;
+
+      case USBHID_KBDUSE_F1:
+        return HIDKBD_DOS_KEY_F1;
+
+      case USBHID_KBDUSE_F2:
+        return HIDKBD_DOS_KEY_F2;
+
+      case USBHID_KBDUSE_F3:
+        return HIDKBD_DOS_KEY_F3;
+
+      case USBHID_KBDUSE_F4:
+        return HIDKBD_DOS_KEY_F4;
+
+      case USBHID_KBDUSE_F5:
+        return HIDKBD_DOS_KEY_F5;
+
+      case USBHID_KBDUSE_F6:
+        return HIDKBD_DOS_KEY_F6;
+
+      case USBHID_KBDUSE_F7:
+        return HIDKBD_DOS_KEY_F7;
+
+      case USBHID_KBDUSE_F8:
+        return HIDKBD_DOS_KEY_F8;
+
+      case USBHID_KBDUSE_F9:
+        return HIDKBD_DOS_KEY_F9;
+
+      case USBHID_KBDUSE_F10:
+        return HIDKBD_DOS_KEY_F10;
+
+      case USBHID_KBDUSE_F11:
+        return HIDKBD_DOS_KEY_F11;
+
+      case USBHID_KBDUSE_F12:
+        return HIDKBD_DOS_KEY_F12;
+
+      case USBHID_KBDUSE_SCROLLLOCK:
+        return HIDKBD_DOS_KEY_SCRLCK;
+
+      case USBHID_KBDUSE_PAUSE:
+        return HIDKBD_DOS_KEY_PAUSE;
+
+      case USBHID_KBDUSE_INSERT:
+      case USBHID_KBDUSE_KPDINSERT:
+        return HIDKBD_DOS_KEY_INS;
+
+      case USBHID_KBDUSE_HOME:
+      case USBHID_KBDUSE_KPDHOME:
+        return HIDKBD_DOS_KEY_HOME;
+
+      case USBHID_KBDUSE_PAGEUP:
+      case USBHID_KBDUSE_KPDPAGEUP:
+        return HIDKBD_DOS_KEY_PGUP;
+
+      case USBHID_KBDUSE_DELFWD:
+      case USBHID_KBDUSE_KPDDELETE:
+        return HIDKBD_DOS_KEY_DEL;
+
+      case USBHID_KBDUSE_END:
+      case USBHID_KBDUSE_KPDEND:
+        return HIDKBD_DOS_KEY_END;
+
+      case USBHID_KBDUSE_PAGEDOWN:
+      case USBHID_KBDUSE_KPDPAGEDN:
+        return HIDKBD_DOS_KEY_PGDN;
+
+      case USBHID_KBDUSE_RIGHT:
+      case USBHID_KBDUSE_KPDRIGHT:
+        return HIDKBD_DOS_KEY_RIGHTARROW;
+
+      case USBHID_KBDUSE_LEFT:
+      case USBHID_KBDUSE_KPDLEFT:
+        return HIDKBD_DOS_KEY_LEFTARROW;
+
+      case 0x51: /* Keyboard DownArrow */
+      case USBHID_KBDUSE_KPDDOWN:
+        return HIDKBD_DOS_KEY_DOWNARROW;
+
+      case USBHID_KBDUSE_UP:
+      case USBHID_KBDUSE_KPDUP:
+        return HIDKBD_DOS_KEY_UPARROW;
+#else
+      case USBHID_KBDUSE_ENTER:
+      case USBHID_KBDUSE_KPDEMTER:
+        return KEYCODE_ENTER;
+
+      case USBHID_KBDUSE_ESCAPE:
+        return XK_Escape;
+
+      case USBHID_KBDUSE_DELETE:
+        return XK_BackSpace;
+
+      case USBHID_KBDUSE_TAB:
+        return XK_Tab;
+
+      case USBHID_KBDUSE_CAPSLOCK:
+        return KEYCODE_CAPSLOCK;
+
+      case USBHID_KBDUSE_F1:
+      case USBHID_KBDUSE_F2:
+      case USBHID_KBDUSE_F3:
+      case USBHID_KBDUSE_F4:
+      case USBHID_KBDUSE_F5:
+      case USBHID_KBDUSE_F6:
+      case USBHID_KBDUSE_F7:
+      case USBHID_KBDUSE_F8:
+      case USBHID_KBDUSE_F9:
+      case USBHID_KBDUSE_F10:
+      case USBHID_KBDUSE_F11:
+      case USBHID_KBDUSE_F12:
+        return KEYCODE_F1 + scancode - USBHID_KBDUSE_F1;
+
+      case USBHID_KBDUSE_SCROLLLOCK:
+        return KEYCODE_SCROLLLOCK;
+
+      case USBHID_KBDUSE_PAUSE:
+        return KEYCODE_PAUSE;
+
+      case USBHID_KBDUSE_INSERT:
+      case USBHID_KBDUSE_KPDINSERT:
+        return KEYCODE_INSERT;
+
+      case USBHID_KBDUSE_HOME:
+      case USBHID_KBDUSE_KPDHOME:
+        return KEYCODE_HOME;
+
+      case USBHID_KBDUSE_PAGEUP:
+      case USBHID_KBDUSE_KPDPAGEUP:
+        return KEYCODE_PAGEUP;
+
+      case USBHID_KBDUSE_DELFWD:
+      case USBHID_KBDUSE_KPDDELETE:
+        return KEYCODE_FWDDEL;
+
+      case USBHID_KBDUSE_END:
+      case USBHID_KBDUSE_KPDEND:
+        return KEYCODE_END;
+
+      case USBHID_KBDUSE_PAGEDOWN:
+      case USBHID_KBDUSE_KPDPAGEDN:
+        return KEYCODE_PAGEDOWN;
+
+      case USBHID_KBDUSE_RIGHT:
+      case USBHID_KBDUSE_KPDRIGHT:
+        return KEYCODE_RIGHT;
+
+      case USBHID_KBDUSE_LEFT:
+      case USBHID_KBDUSE_KPDLEFT:
+        return KEYCODE_LEFT;
+
+      case 0x51: /* Keyboard DownArrow */
+      case USBHID_KBDUSE_KPDDOWN:
+        return KEYCODE_DOWN;
+
+      case USBHID_KBDUSE_UP:
+      case USBHID_KBDUSE_KPDUP:
+        return KEYCODE_UP;
+#endif
+
+      case USBHID_KBDUSE_SPACE:
+        return ' ';
+
+      case USBHID_KBDUSE_HYPHEN:
+        return '-';
+
+      case USBHID_KBDUSE_EQUAL:
+        return '=';
+
+      case USBHID_KBDUSE_LBRACKET:
+        return '[';
+
+      case USBHID_KBDUSE_RBRACKET:
+        return ']';
+
+      case USBHID_KBDUSE_BSLASH:
+      case USBHID_KBDUSE_NONUSBSLASH:
+        return '\\';
+
+      case USBHID_KBDUSE_SEMICOLON:
+        return ';';
+
+      case USBHID_KBDUSE_SQUOTE:
+        return '\'';
+
+      case USBHID_KBDUSE_GACCENT:
+        return '`';
+
+      case USBHID_KBDUSE_COMMON:
+        return ',';
+
+      case USBHID_KBDUSE_PERIOD:
+        return '.';
+
+      case USBHID_KBDUSE_DIV:
+      case USBHID_KBDUSE_KPDDIV:
+        return '/';
+
+      case USBHID_KBDUSE_KPDMUL:
+        return '*';
+
+      case USBHID_KBDUSE_KPDHMINUS:
+        return '-';
+
+      case USBHID_KBDUSE_KPDPLUS:
+        return '+';
+
+      default:
+        return 0;
+    }
+}
+
+static uint32_t usbhost_input_modifier_keycode(uint8_t modifier)
+{
+  switch (modifier)
+    {
+#ifdef CONFIG_HIDKBD_INPUT_DOSKEYS
+      case USBHID_MODIFER_LCTRL:
+      case USBHID_MODIFER_RCTRL:
+        return HIDKBD_DOS_KEY_RCTRL;
+
+      case USBHID_MODIFER_LSHIFT:
+      case USBHID_MODIFER_RSHIFT:
+        return HIDKBD_DOS_KEY_RSHIFT;
+
+      case USBHID_MODIFER_LALT:
+      case USBHID_MODIFER_RALT:
+        return HIDKBD_DOS_KEY_RALT;
+#else
+      case USBHID_MODIFER_LCTRL:
+        return XK_Control_L;
+
+      case USBHID_MODIFER_RCTRL:
+        return XK_Control_R;
+
+      case USBHID_MODIFER_LSHIFT:
+        return XK_Shift_L;
+
+      case USBHID_MODIFER_RSHIFT:
+        return XK_Shift_R;
+
+      case USBHID_MODIFER_LALT:
+        return XK_Alt_L;
+
+      case USBHID_MODIFER_RALT:
+        return XK_Alt_R;
+
+      case USBHID_MODIFER_LGUI:
+        return XK_Meta_L;
+
+      case USBHID_MODIFER_RGUI:
+        return XK_Meta_R;
+#endif
+    }
+
+  return 0;
+}
+
+static bool usbhost_input_report_has_key(
+  FAR const struct usbhid_kbdreport_s *rpt, uint8_t scancode)
+{
+  int i;
+
+  for (i = 0; i < 6; i++)
+    {
+      if (rpt->key[i] == scancode)
+        {
+          return true;
+        }
+    }
+
+  return false;
+}
+
+static int usbhost_input_attach(FAR struct usbhost_state_s *priv)
+{
+  int ret = OK;
+
+  if (priv->input_registered)
+    {
+      return OK;
+    }
+
+  ret = nxmutex_lock(&g_hidkbd_input_lock);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  if (!g_hidkbd_input_registered)
+    {
+      memset(&g_hidkbd_inputlower, 0, sizeof(g_hidkbd_inputlower));
+      ret = keyboard_register(&g_hidkbd_inputlower,
+                              CONFIG_HIDKBD_INPUT_DEVPATH,
+                              CONFIG_HIDKBD_BUFSIZE);
+      if (ret < 0)
+        {
+          uerr("ERROR: Failed to register %s: %d\n",
+               CONFIG_HIDKBD_INPUT_DEVPATH, ret);
+          nxmutex_unlock(&g_hidkbd_input_lock);
+          return ret;
+        }
+
+      g_hidkbd_input_registered = true;
+    }
+
+  g_hidkbd_input_refs++;
+  priv->input_registered = true;
+  nxmutex_unlock(&g_hidkbd_input_lock);
+  return OK;
+}
+
+static void usbhost_input_detach(FAR struct usbhost_state_s *priv)
+{
+  if (!priv->input_registered)
+    {
+      return;
+    }
+
+  if (nxmutex_lock(&g_hidkbd_input_lock) < 0)
+    {
+      return;
+    }
+
+  if (g_hidkbd_input_refs > 0)
+    {
+      g_hidkbd_input_refs--;
+    }
+
+  priv->input_registered = false;
+  if (g_hidkbd_input_refs == 0 && g_hidkbd_input_registered)
+    {
+      keyboard_unregister(&g_hidkbd_inputlower,
+                          CONFIG_HIDKBD_INPUT_DEVPATH);
+      g_hidkbd_input_registered = false;
+    }
+
+  nxmutex_unlock(&g_hidkbd_input_lock);
+}
+
+static void usbhost_input_event(FAR struct usbhost_state_s *priv,
+                                uint8_t scancode, uint32_t type)
+{
+  uint32_t keycode;
+
+  if (!priv->input_registered)
+    {
+      return;
+    }
+
+  keycode = usbhost_input_keycode(scancode);
+  if (keycode != 0)
+    {
+      keyboard_event(&g_hidkbd_inputlower, keycode, type);
+    }
+}
+
+static void usbhost_input_modifier_event(FAR struct usbhost_state_s *priv,
+                                         uint8_t modifier, uint32_t type)
+{
+  uint32_t keycode;
+
+  if (!priv->input_registered)
+    {
+      return;
+    }
+
+  keycode = usbhost_input_modifier_keycode(modifier);
+  if (keycode != 0)
+    {
+      keyboard_event(&g_hidkbd_inputlower, keycode, type);
+    }
+}
+
+static void usbhost_input_extract_keys(FAR struct usbhost_state_s *priv,
+                                       FAR const struct usbhid_kbdreport_s *rpt)
+{
+  static const uint8_t modifiers[] =
+  {
+    USBHID_MODIFER_LCTRL,
+    USBHID_MODIFER_LSHIFT,
+    USBHID_MODIFER_LALT,
+    USBHID_MODIFER_LGUI,
+    USBHID_MODIFER_RCTRL,
+    USBHID_MODIFER_RSHIFT,
+    USBHID_MODIFER_RALT,
+    USBHID_MODIFER_RGUI
+  };
+
+  uint8_t changed;
+  int i;
+
+  changed = rpt->modifier ^ priv->input_lastmod;
+  for (i = 0; i < sizeof(modifiers) / sizeof(modifiers[0]); i++)
+    {
+      if ((changed & modifiers[i]) != 0)
+        {
+          uint32_t type = (rpt->modifier & modifiers[i]) != 0 ?
+                          KEYBOARD_PRESS : KEYBOARD_RELEASE;
+
+          usbhost_input_modifier_event(priv, modifiers[i], type);
+        }
+    }
+
+  for (i = 0; i < 6; i++)
+    {
+      uint8_t scancode = priv->input_lastkey[i];
+
+      if (scancode != USBHID_KBDUSE_NONE &&
+          !usbhost_input_report_has_key(rpt, scancode))
+        {
+          usbhost_input_event(priv, scancode, KEYBOARD_RELEASE);
+        }
+    }
+
+  for (i = 0; i < 6; i++)
+    {
+      uint8_t scancode = rpt->key[i];
+
+      if (scancode != USBHID_KBDUSE_NONE &&
+          !memchr(priv->input_lastkey, scancode, sizeof(priv->input_lastkey)))
+        {
+          usbhost_input_event(priv, scancode, KEYBOARD_PRESS);
+        }
+    }
+
+  memcpy(priv->input_lastkey, rpt->key, sizeof(priv->input_lastkey));
+  priv->input_lastmod = rpt->modifier;
+}
+#endif
+
+/****************************************************************************
  * Name: usbhost_encodescancode
  *
  * Description:
@@ -1110,6 +1655,10 @@ static int usbhost_extract_keys(FAR struct usbhost_state_s *priv)
       return ret;
     }
 
+#ifdef CONFIG_HIDKBD_INPUT
+  usbhost_input_extract_keys(priv, rpt);
+#endif
+
   for (i = 0; i < 6; i++)
     {
       /* Is this key pressed?  But not pressed last time?
@@ -1237,6 +1786,38 @@ static int usbhost_extract_keys(FAR struct usbhost_state_s *priv)
 }
 
 /****************************************************************************
+ * Name: usbhost_kbd_retry
+ *
+ * Description:
+ *   Re-queue keyboard interrupt processing after the current work item has
+ *   returned.
+ *
+ ****************************************************************************/
+
+#ifdef CONFIG_HIDKBD_NOGETREPORT
+static void usbhost_kbd_retry(FAR void *arg)
+{
+  FAR struct usbhost_state_s *priv;
+
+  priv = (FAR struct usbhost_state_s *)arg;
+  DEBUGASSERT(priv);
+
+  if (!priv->disconnected && priv->epin)
+    {
+      if (work_available(&priv->rwork))
+        {
+          work_queue(HPWORK, &priv->rwork, usbhost_kbd_work, priv, 0);
+        }
+      else if (work_available(&priv->rretrywork))
+        {
+          work_queue(HPWORK, &priv->rretrywork, usbhost_kbd_retry,
+                     priv, MSEC2TICK(10));
+        }
+    }
+}
+#endif
+
+/****************************************************************************
  * Name: usbhost_kbd_work
  *
  * Description:
@@ -1347,6 +1928,11 @@ static void usbhost_kbd_callback(FAR void *arg, ssize_t nbytes)
       if (work_available(&priv->rwork))
         {
           work_queue(HPWORK, &priv->rwork, usbhost_kbd_work, priv, 0);
+        }
+      else if (work_available(&priv->rretrywork))
+        {
+          work_queue(HPWORK, &priv->rretrywork, usbhost_kbd_retry,
+                     priv, MSEC2TICK(10));
         }
     }
 }
@@ -1992,6 +2578,16 @@ static inline int usbhost_devinit(FAR struct usbhost_state_s *priv)
   uinfo("Register driver\n");
   usbhost_mkdevname(priv, devname);
   ret = register_driver(devname, &g_hidkbd_fops, 0666, priv);
+  if (ret >= 0)
+    {
+#ifdef CONFIG_HIDKBD_INPUT
+      ret = usbhost_input_attach(priv);
+      if (ret < 0)
+        {
+          unregister_driver(devname);
+        }
+#endif
+    }
 
   /* We now have to be concerned about asynchronous modification of crefs
    * because the driver has been registered.
